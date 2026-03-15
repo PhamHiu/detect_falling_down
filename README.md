@@ -30,6 +30,10 @@ frames by hand for training ST-GCN model.
 
 ## Pre-Trained Models
 
+Bạn có thể tải toàn bộ các tệp mô hình (pretrained models) tại đây:
+- **Link dự phòng (Models):** [Models Resource](http://139.162.154.74/lior2/Human-Falling-Detect-Tracks/-/tree/master/Models)
+
+Hoặc tải lẻ từng file:
 - Tiny-YOLO oneclass - [.pth](https://drive.google.com/file/d/1obEbWBSm9bXeg10FriJ7R2cGLRsg-AfP/view?usp=sharing),
 [.cfg](https://drive.google.com/file/d/19sPzBZjAjuJQ3emRteHybm2SG25w9Wn5/view?usp=sharing)
 - SPPE FastPose (AlphaPose) - [resnet101](https://drive.google.com/file/d/1N2MgE1Esq6CKYA6FyZVKpPwHRyOCrzA0/view?usp=sharing),

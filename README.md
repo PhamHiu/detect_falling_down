@@ -16,7 +16,7 @@ Which now support 7 actions: Standing, Walking, Sitting, Lying Down, Stand up, S
 - Python > 3.6
 - Pytorch > 1.3.1
 
-Original test run on: i7-8750H CPU @ 2.20GHz x12, GeForce RTX 2070 8GB, CUDA 10.2
+Original test run on: R9 7945hx CPU @ 5.40GHz x16, GeForce RTX 4060 8GB, CUDA 12.4
 
 ## Data
 

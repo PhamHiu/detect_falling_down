@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from datetime import datetime
 import shutil
 import os
+import time
 
 app = FastAPI()
 
@@ -21,6 +22,13 @@ class FallStatus:
         self.fall_detected = False
         self.fall_time = ""
         self.evidence_url = ""
+        self.cooldown_start_time: float = 0.0  # Thời điểm bắt đầu 5 phút khóa (tính từ khi ESP đọc được)
+
+    def is_in_cooldown(self) -> bool:
+        """ Kiểm tra xem hiện tại có đang trong thời gian khóa 5 phút không """
+        return (time.time() - self.cooldown_start_time) < COOLDOWN_SECONDS
+
+COOLDOWN_SECONDS = 5 * 60  # 5 phút = 300 giây
 
 current_status = FallStatus()
 
@@ -32,6 +40,12 @@ async def report_fall(
     """
     Endpoint dành cho AI báo cáo khi phát hiện ngã.
     """
+    # Kiểm tra cooldown: Nếu đang trong thời gian khóa 5 phút thì bỏ qua
+    if current_status.is_in_cooldown():
+        remaining = int(COOLDOWN_SECONDS - (time.time() - current_status.cooldown_start_time))
+        print(f"[API] Đang trong cooldown 5 phút, bỏ qua báo cáo ngã ({remaining}s còn lại).")
+        return {"status": "skipped", "message": f"Cooldown active, {remaining}s remaining"}
+
     # Lưu file ảnh
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"fall_{track_id}_{timestamp}.jpg"
@@ -40,7 +54,7 @@ async def report_fall(
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(image.file, buffer)
     
-    # Cập nhật trạng thái
+    # Cập nhật trạng thái (cooldown chưa bắt đầu tại đây, sẽ bắt đầu khi ESP đọc được)
     current_status.fall_detected = True
     current_status.fall_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     current_status.evidence_url = f"/evidence/{filename}"
@@ -54,10 +68,24 @@ async def get_status():
     """
     Endpoint dành cho ESP32 truy vấn trạng thái.
     """
+    # Lấy trạng thái hiện tại
+    detected = current_status.fall_detected
+    time_str = current_status.fall_time
+    evi_url = current_status.evidence_url
+
+    # Nếu ESP32 vừa nhận được thông tin ngã lần đầu tiên:
+    # -> Gạt cờ về False ngay lập tức
+    # -> KHỚI ĐỘNG đồng hồ khóa 5 phút (cooldown_start_time)
+    # Đảm bảo fall_detected luôn giữ mức False suốt 5 phút kế tiếp
+    if detected:
+        current_status.fall_detected = False
+        current_status.cooldown_start_time = time.time()  # Bắt đầu đồng hồ 5 phút
+        print(f"[API] ESP32 đã nhận tin ngã. Khóa cờ 5 phút bắt đầu.")
+
     return {
-        "fall_detected": current_status.fall_detected,
-        "fall_time": current_status.fall_time,
-        "evidence": current_status.evidence_url
+        "fall_detected": detected,
+        "fall_time": time_str,
+        "evidence": evi_url
     }
 
 @app.post("/reset")

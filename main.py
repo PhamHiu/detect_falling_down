@@ -11,6 +11,7 @@ from fn import draw_single
 
 from Track.Tracker import Detection, Tracker
 from ActionsEstLoader import TSSTG
+from fall_logic import FallLogicManager
 
 #source = '../Data/test_video/test7.mp4'
 #source = '../Data/falldata/Home/Videos/video (2).avi'  # hard detect
@@ -59,13 +60,19 @@ if __name__ == '__main__':
     # Actions Estimate (ST-GCN — kept unchanged).
     action_model = TSSTG(device=device)
 
+    # Fall Logic Manager (unified states + 45s timer).
+    fall_manager = FallLogicManager(persistence_threshold=45)
+
     cam_source = args.camera
     if type(cam_source) is str and os.path.isfile(cam_source):
         # Use loader thread with Q for video file.
         cam = CamLoader_Q(cam_source, queue_size=1000).start()
     else:
         # Use normal thread loader for webcam.
-        cam = CamLoader(int(cam_source) if cam_source.isdigit() else cam_source).start()
+        if isinstance(cam_source, int):
+            cam = CamLoader(cam_source).start()
+        else:
+            cam = CamLoader(int(cam_source) if cam_source.isdigit() else cam_source).start()
 
     outvid = False
     if args.save_out != '':
@@ -129,8 +136,15 @@ if __name__ == '__main__':
                 pts = np.array(track.keypoints_list, dtype=np.float32)
                 out = action_model.predict(pts, frame.shape[:2])
                 action_name = action_model.class_names[out[0].argmax()]
-                action = '{}: {:.2f}%'.format(action_name, out[0].max() * 100)
-                if action_name == 'Fall Down':
+                
+                # Apply unified fall logic.
+                display_action, elapsed = fall_manager.update(track_id, action_name, frame)
+                
+                action = '{}: {:.2f}%'.format(display_action, out[0].max() * 100)
+                if elapsed > 0:
+                    action += ' ({:.1f}s)'.format(elapsed)
+                
+                if display_action == 'Fall':
                     clr = (255, 0, 0)
                 elif action_name == 'Lying Down':
                     clr = (255, 200, 0)
@@ -144,6 +158,10 @@ if __name__ == '__main__':
                                     0.4, (255, 0, 0), 2)
                 frame = cv2.putText(frame, action, (bbox[0] + 5, bbox[1] + 15), cv2.FONT_HERSHEY_COMPLEX,
                                     0.4, clr, 1)
+
+        # Cleanup inactive tracks from fall manager.
+        active_ids = [t.track_id for t in tracker.tracks if t.is_confirmed()]
+        fall_manager.cleanup_inactive_tracks(active_ids)
 
         # Show Frame.
         frame = cv2.resize(frame, (0, 0), fx=2., fy=2.)

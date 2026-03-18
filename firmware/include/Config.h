@@ -7,14 +7,14 @@
 #define BLYNK_AUTH_TOKEN "KveCGf33u8V1WhImVQS2E3YHGdjnCSYy"
 
 // --- WiFi Credentials ---
-const char *ssid = "Xiaomi13pro";
-const char *pass = "123456780@";
+const char *ssid = "Xiaomi";
+const char *pass = "12345679@";
 
 // --- API Server Settings ---
 // LƯU Ý: Thay đổi IP này thành IP máy tính của bạn (chạy FastAPI)
 // Ví dụ: "http://192.168.1.10:8000"
 const char *server_url = "http://10.221.65.225:8000/status";
-const char *reset_url = "http://10.221.65.225:8000/reset";
+const char *reset_url = "http://10.128.150.225:8000/reset";
 
 // --- Notification Settings ---
 #define NOTIFICATION_INTERVAL 20000 // 20 giây một lần ở Level 2

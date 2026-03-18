@@ -1,9 +1,30 @@
-#include "Config.h"
+// --- Blynk Credentials ---
+#define BLYNK_TEMPLATE_ID "TMPL6nXDjldOr"
+#define BLYNK_TEMPLATE_NAME "FallDetection"
+#define BLYNK_AUTH_TOKEN "KveCGf33u8V1WhImVQS2E3YHGdjnCSYy"
+
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <BlynkSimpleEsp32.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
+
+
+
+// --- WiFi Credentials ---
+const char ssid[] = "Xiaomi";
+const char pass[] = "12345679@";
+
+// --- API Server Settings ---
+// LƯU Ý: Thay đổi IP này thành IP máy tính của bạn (chạy FastAPI)
+// Ví dụ: "http://192.168.1.10:8000"
+const char *server_url = "http://10.128.150.225:8000/status";
+const char *reset_url = "http://10.128.150.225:8000/reset";
+
+// --- Notification Settings ---
+#define NOTIFICATION_INTERVAL 20000 // 20 giây một lần ở Level 2
+#define LEVEL_1_TIMEOUT 120000      // 2 phút
+#define LEVEL_2_TIMEOUT 300000      // 5 phút
 
 // Bảng chân I2S cho Audio (Tham chiếu)
 #define I2S_EN_PIN 1
@@ -309,7 +330,7 @@ BLYNK_WRITE(V6) {
         "[HỆ THỐNG] Người nhà xác nhận ĐÃ BIẾT tin cấp cứu. Reset về IDLE.");
     resetSystem();
   }
-}
+} 
 
 void setup() {
   Serial.begin(115200);

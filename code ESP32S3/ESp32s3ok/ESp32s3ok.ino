@@ -1,9 +1,29 @@
-#include "Config.h"
+// --- Blynk Credentials ---
+#define BLYNK_TEMPLATE_ID "TMPL6nXDjldOr"
+#define BLYNK_TEMPLATE_NAME "FallDetection"
+#define BLYNK_AUTH_TOKEN "KveCGf33u8V1WhImVQS2E3YHGdjnCSYy"
+
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <BlynkSimpleEsp32.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
+
+
+// --- WiFi Credentials ---
+const char ssid[] = "Xiaomi";
+const char pass[] = "12345679@";
+
+// --- API Server Settings ---
+// LƯU Ý: Thay đổi IP này thành IP máy tính của bạn (chạy FastAPI)
+// Ví dụ: "http://192.168.1.10:8000"
+const char *server_url = "http://10.128.150.225:8000/status";
+const char *reset_url  = "http://10.128.150.225:8000/reset";
+
+// --- Notification Settings ---
+#define NOTIFICATION_INTERVAL 20000 // 20 giây một lần ở Level 2
+#define LEVEL_1_TIMEOUT 120000      // 2 phút
+#define LEVEL_2_TIMEOUT 300000      // 5 phút
 
 // Bảng chân I2S cho Audio (Tham chiếu)
 #define I2S_EN_PIN 1
@@ -35,9 +55,7 @@ bool level1Notified = false;
 unsigned long level2StartTime = 0;
 bool level2Notified = false;
 
-int blynk_v0_state = 0; // Lưu trạng thái nút V0 (I'm OK) trên blynk
-unsigned long lastV6Write =
-    0; // Timer cho việc giữ đèn V6 trong WAIT_FOR_BUTTON
+int blynk_v0_state = 0; // Lưu trạng thái nút V0 trên blynk
 
 // Danh sách số điện thoại nhận SOS (Cài đặt cố định)
 String SDT[] = {"0123456789", "0987654321"};
@@ -50,7 +68,6 @@ bool checkVoiceCommand();
 void resetSystem();
 void sendSOS();
 void handleStateLogic();
-void triggerSOS(); // Wrapper: sendSOS() + chuyển sang WAIT_FOR_BUTTON
 
 // BƯỚC 1: Hàm checkApiStatus để nhận các thông tin từ server
 void checkApiStatus() {
@@ -71,9 +88,9 @@ void checkApiStatus() {
 
         // Lấy domain gốc (cắt bỏ phần đuôi đằng sau mốc Port :8000)
         String baseUrl = String(server_url);
-        int portIndex = baseUrl.indexOf(":8000");
+        int portIndex = baseUrl.indexOf(":8000"); 
         if (portIndex > 0) {
-          baseUrl = baseUrl.substring(0, portIndex + 5);
+          baseUrl = baseUrl.substring(0, portIndex + 5); 
         }
 
         evidenceUrl = baseUrl + doc["evidence"].as<String>();
@@ -128,9 +145,7 @@ void resetSystem() {
   Serial.println("[HỆ THỐNG] Resetting system to IDLE...");
   currentState = IDLE;
   level1Notified = false;
-  level2Notified = false;
   blynk_v0_state = 0;
-  lastV6Write = 0;
   fallTimeStr = "";
   evidenceUrl = "";
 
@@ -141,18 +156,17 @@ void resetSystem() {
     http.end();
   }
 
-  // Khôi phục TẤT CẢ các chân Blynk về trạng thái an toàn ban đầu
-  Blynk.virtualWrite(V0, 0);         // Tắt nút I'm OK
-  Blynk.virtualWrite(V1, "");        // Xóa label cảnh báo
-  Blynk.virtualWrite(V2, "");        // Xóa label thời gian
-  Blynk.setProperty(V3, "urls", ""); // Xóa ảnh bằng chứng
-  Blynk.virtualWrite(V6, 0);         // Tắt đèn SOS khẩn cấp
-  Blynk.virtualWrite(V10, 0);        // Tắt nút Gọi Cấp Cứu (Level 1)
-  Blynk.virtualWrite(V11, 0);        // Tắt nút An Toàn
-  Blynk.virtualWrite(V12, 0);        // Tắt nút SOS
+  // Khôi phục các chân trên app Blynk về trạng thái an toàn ban đầu
+  Blynk.virtualWrite(V0, 0);
+  Blynk.virtualWrite(V1, "");
+  Blynk.virtualWrite(V2, "");
+  Blynk.setProperty(V3, "urls", ""); // Xóa hình ảnh nếu hỗ trợ
+  Blynk.virtualWrite(V6, 0);
+  Blynk.virtualWrite(V11, 0);
+  Blynk.virtualWrite(V12, 0);
 }
 
-// BƯỚC 9: Xây dựng hàm SOS() — Chỉ gửi thông tin, KHÔNG block vòng lặp
+// BƯỚC 9: Xây dựng hàm SOS()
 void sendSOS() {
   Serial.println("==================================");
   Serial.println("THỰC HIỆN GỬI SOS ĐẾN CƠ QUAN Y TẾ VÀ NGƯỜI NHÀ");
@@ -168,89 +182,61 @@ void sendSOS() {
     Serial.println("-> Đang gửi thông báo đến SĐT: " + SDT[i]);
   }
   Serial.println("==================================");
-  // Sau khi gửi SOS, nơi gọi hàm phải set currentState = WAIT_FOR_BUTTON
-  // Việc bật V6 liên tục sẽ do handleStateLogic() xử lý (non-blocking)
-}
-
-// Wrapper tiện ích: Gọi SOS và chuyển sang trạng thái chờ xác nhận
-void triggerSOS() {
-  sendSOS();
-  currentState = WAIT_FOR_BUTTON;
-  lastV6Write = 0; // Reset timer để V6 bật ngay lập tức
 }
 
 // BƯỚC 6, 7, 8: Hàm xử lý loop logic cho hệ thống
 void handleStateLogic() {
   switch (currentState) {
-
-  // ── GIAI ĐOẠN 1: PHÁT HIỆN NGÃ, NẠN NHÂN CÒN NHẬN THỨC ──
+  // PHÁT HIỆN NGÃ VÀ NẠN NHÂN CÒN NHẬN THỨC
   case LEVEL_1: {
-    // Thông báo 1 lần duy nhất khi mới vào Level 1
+    // Nếu chưa thông báo thì đẩy lên serial và app 1 lần duy nhất
     if (!level1Notified) {
-      Serial.println(
-          "[LEVEL 1] Phát hiện ngã! Đang chờ phản hồi từ nạn nhân...");
-      Blynk.virtualWrite(V0,
-                         1); // Bật nút I'm OK (đỏ) — nạn nhân gạt về 0 nếu ổn
-      Blynk.virtualWrite(V10, 1); // Bật nút Gọi Cấp Cứu (Level 1)
+      blynk_v0_state = 1;
+      Blynk.virtualWrite(V0, 1);
+      Serial.println("[LEVEL 1] Hệ thống phát hiện ngã!");
       level1Notified = true;
     }
 
-    // Trong vòng 2 phút (120,000 ms): phát âm thanh + lắng nghe giọng nói
+    // Liên tục chạy trong 2 phút (120,000 ms), kết hợp chạy âm thanh và mic
     if (millis() - level1StartTime < 120000) {
-      playAudio(1); // Phát âm thanh cảnh báo Level 1
-      bool saySafe =
-          checkVoiceCommand(); // Ghi âm và đối chiếu "tôi ổn" (Non-blocking)
+      Blynk.run(); // Luôn duy trì kết nối Blynk liên tục tránh timeout
+      playAudio(1);                       // Phát âm thanh cảnh báo level 1
+      bool saySafe = checkVoiceCommand(); // Ghi âm và đối chiếu (Đảm bảo logic bên trong hàm này Non-blocking - không dùng delay)
 
-      if (saySafe) {
-        Serial.println("[LEVEL 1] Xác nhận an toàn từ giọng nói!");
-        pauseApiRetrieval();
+      // Hoặc nói tôi ổn, hoặc nhấn V0 trên đt dể về 0
+      if (saySafe || blynk_v0_state == 0) {
+        Serial.println(
+            "[HỆ THỐNG] Xác nhận an toàn từ giọng nói hoặc Blynk V0!");
         resetSystem();
       }
-      // Xử lý nút V0 (I'm OK) và V10 (Gọi Cấp Cứu) do BLYNK_WRITE() đảm nhiệm
     } else {
-      // Hết 2 phút không phản hồi → Chuyển qua LEVEL 2
-      Serial.println("[LEVEL 1] Hết 2 phút, nạn nhân không phản hồi. Chuyển "
-                     "sang LEVEL 2.");
+      // Hết 2 phút mà không có xác nhận -> Chuyển qua LEVEL 2
       currentState = LEVEL_2;
       level2StartTime = millis();
       level2Notified = false;
     }
     break;
   }
-
-  // ── GIAI ĐOẠN 2: NẠN NHÂN KHÔNG NHẬN THỨC — CHỜ NGƯỜI NHÀ ──
+  // NẠN NHÂN KHÔNG NHẬN THỨC
   case LEVEL_2: {
-    // Đẩy thông báo & bật các nút hành động 1 lần khi vào Level 2
+    // BƯỚC 7 phần 1: Gửi thông báo label và picture
     if (!level2Notified) {
       Blynk.virtualWrite(V1, "Cảnh báo: Có người bị ngã hãy check cam ngay");
       Blynk.virtualWrite(V2, fallTimeStr);
-      Blynk.setProperty(V3, "urls", evidenceUrl); // Tải URL ảnh bằng chứng
-      Blynk.virtualWrite(V11, 1); // Bật nút "An Toàn" (xanh) cho người nhà
-      Blynk.virtualWrite(V12, 1); // Bật nút "SOS" (đỏ) cho người nhà
+      Blynk.setProperty(V3, "urls", evidenceUrl); // Tải url hình ảnh
+
       level2Notified = true;
-      Serial.println("[LEVEL 2] Đã đẩy cảnh báo lên Blynk (V1, V2, V3, V11, "
-                     "V12). Đang đếm 3 phút...");
+      Serial.println("[LEVEL 2] Đã đẩy cảnh báo lên Blynk (V1, V2, V3)");
     }
 
-    // Quá 3 phút (180,000 ms) mà người nhà không bấm → Tự động gửi SOS
-    if (millis() - level2StartTime >= 180000) {
-      Serial.println(
-          "[LEVEL 2] Quá 3 phút không phản hồi. Tự động kích hoạt SOS!");
-      triggerSOS();
+    // BƯỚC 8: Quá 5 phút (300,000 ms) mà V11, V12 vẫn 0 (chưa ai bấm)
+    if (millis() - level2StartTime >= 300000) {
+      Serial.println("[LEVEL 2] Quá 5 phút không phản hồi. Gửi SOS khẩn cấp!");
+      Blynk.virtualWrite(
+          V6, 1); // Cảnh báo khẩn cấp (v6=1) nút đỏ báo nguy hiểm trên app
+      sendSOS();
+      currentState = WAIT_FOR_BUTTON;
     }
-    // Xử lý nút V11 (An Toàn) và V12 (SOS) do BLYNK_WRITE() đảm nhiệm
-    break;
-  }
-
-  // ── TRẠNG THÁI CHỜ XÁC NHẬN SAU SOS ──
-  case WAIT_FOR_BUTTON: {
-    // Giữ đèn V6 luôn sáng đỏ, cứ mỗi 500ms ghi 1 lần (non-blocking)
-    unsigned long now = millis();
-    if (now - lastV6Write >= 500) {
-      Blynk.virtualWrite(V6, 1); // Duy trì đèn đỏ khẩn cấp
-      lastV6Write = now;
-    }
-    // Xử lý nút V6 (xác nhận đã biết) do BLYNK_WRITE() đảm nhiệm
     break;
   }
 
@@ -262,51 +248,32 @@ void handleStateLogic() {
 
 // ================= XỬ LÝ SỰ KIỆN TỪ BLYNK APP =================
 
-// [V0] Nút "I'm OK" (Switch) — Nạn nhân xác nhận an toàn tại LEVEL_1
-// Hệ thống ghi V0=1 (bật đỏ). Nạn nhân gạt về OFF (=0) → xác nhận ổn.
-BLYNK_WRITE(V0) {
-  blynk_v0_state = param.asInt();
-  if (blynk_v0_state == 0 && currentState == LEVEL_1) {
-    Serial.println(
-        "[LEVEL 1] Nạn nhân xác nhận AN TOÀN qua nút I'm OK trên Blynk!");
-    pauseApiRetrieval(); // Tạm dừng truy xuất API 15 phút
-    resetSystem();       // Đưa hệ thống về IDLE
-  }
-}
+// Nút "Tôi ổn" trong quá trình FALL_DETECTED (pin V0)
+BLYNK_WRITE(V0) { blynk_v0_state = param.asInt(); }
 
-// [V10] Nút "Gọi Cấp Cứu" (Push) — Nạn nhân tự kích hoạt SOS tại LEVEL_1
-BLYNK_WRITE(V10) {
-  if (param.asInt() == 1 && currentState == LEVEL_1) {
-    Serial.println("[LEVEL 1] Nạn nhân tự kích hoạt SOS khẩn cấp qua V10!");
-    triggerSOS(); // Gọi SOS và chuyển sang WAIT_FOR_BUTTON
-  }
-}
-
-// [V11] Nút "An Toàn" (Push) — Người nhà xác nhận nạn nhân ổn tại LEVEL_2
+// BƯỚC 7 phần 2: Nút "An toàn" trên blynk (pin V11)
 BLYNK_WRITE(V11) {
   if (param.asInt() == 1 && currentState == LEVEL_2) {
-    Serial.println("[LEVEL 2] Người nhà xác nhận AN TOÀN qua V11!");
-    Blynk.virtualWrite(V12, 0); // Tắt nút SOS còn lại
-    pauseApiRetrieval();        // Tạm dừng truy xuất API 15 phút
-    resetSystem();              // Đưa hệ thống về IDLE
+    pauseApiRetrieval(); // Ngưng truy xuất api
+    resetSystem();       // Reset hệ thống
   }
 }
 
-// [V12] Nút "SOS" (Push) — Người nhà chủ động gọi cấp cứu tại LEVEL_2
+// BƯỚC 7 phần 3: Nút "SOS" (pin V12)
 BLYNK_WRITE(V12) {
   if (param.asInt() == 1 && currentState == LEVEL_2) {
-    Serial.println("[LEVEL 2] Người nhà chủ động kích hoạt SOS qua V12!");
-    triggerSOS(); // Gọi SOS và chuyển sang WAIT_FOR_BUTTON
+    sendSOS();     // Gửi thông tin y tế, người nhà
+    resetSystem(); // Reset hệ thống
   }
 }
 
-// [V6] Đèn SOS khẩn cấp — Người nhà xác nhận đã biết, reset hệ thống
+// Huỷ trạng thái SOS/WAIT_FOR_BUTTON bằng nút V6 trên Blynk
 BLYNK_WRITE(V6) {
   int v6_state = param.asInt();
-  // Khi người dùng bấm nút V6 (giá trị = 1) để xác nhận đã biết thông tin
-  if (v6_state == 1 && currentState == WAIT_FOR_BUTTON) {
-    Serial.println(
-        "[HỆ THỐNG] Người nhà xác nhận ĐÃ BIẾT tin cấp cứu. Reset về IDLE.");
+  // Chỉ khi người nhà bấm lại nút V6 về 0 thì mới kích hoạt reset
+  if (v6_state == 0 && currentState == WAIT_FOR_BUTTON) {
+    Serial.println("[HỆ THỐNG] Người nhà đã xác nhận đã biết tin và xử lý từ "
+                   "Blynk App (Nút V6 = 0).");
     resetSystem();
   }
 }
@@ -335,16 +302,14 @@ void setup() {
   if (WiFi.status() == WL_CONNECTED) {
     Serial.print("\nWiFi connected! IP address: ");
     Serial.println(WiFi.localIP());
-
+    
     // Cấu hình Blynk (KHÔNG BLOCK HỆ THỐNG nếu WiFi rớt)
     Blynk.config(BLYNK_AUTH_TOKEN);
-    Blynk
-        .connect(); // Sẽ cố gắng connect, nếu không được vẫn thoát ra chay tiep
+    Blynk.connect(); // Sẽ cố gắng connect, nếu không được vẫn thoát ra chay tiep
   } else {
-    Serial.println(
-        "\n[LỖI] Không thể kết nối WiFi, vào mode offline theo dõi.");
+    Serial.println("\n[LỖI] Không thể kết nối WiFi, vào mode offline theo dõi.");
   }
-
+  
   Serial.println("Hệ thống khởi động hoàn tất!");
 }
 

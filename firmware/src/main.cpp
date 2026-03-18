@@ -143,8 +143,7 @@ void resetSystem() {
 
   // Khôi phục TẤT CẢ các chân Blynk về trạng thái an toàn ban đầu
   Blynk.virtualWrite(V0, 0);         // Tắt nút I'm OK
-  Blynk.virtualWrite(V1, "");        // Xóa label cảnh báo
-  Blynk.virtualWrite(V2, "");        // Xóa label thời gian
+  Blynk.virtualWrite(V1, "");        // Xóa Terminal cảnh báo
   Blynk.setProperty(V3, "urls", ""); // Xóa ảnh bằng chứng
   Blynk.virtualWrite(V6, 0);         // Tắt đèn SOS khẩn cấp
   Blynk.virtualWrite(V10, 0);        // Tắt nút Gọi Cấp Cứu (Level 1)
@@ -222,8 +221,9 @@ void handleStateLogic() {
   case LEVEL_2: {
     // Đẩy thông báo & bật các nút hành động 1 lần khi vào Level 2
     if (!level2Notified) {
-      Blynk.virtualWrite(V1, "Cảnh báo: Có người bị ngã hãy check cam ngay");
-      Blynk.virtualWrite(V2, fallTimeStr);
+      String msg = "Cảnh báo: Có người bị ngã hãy check cam ngay\n";
+      msg += "Giờ ngã: " + fallTimeStr;
+      Blynk.virtualWrite(V1, msg); // Gửi vào Terminal V1
       Blynk.setProperty(V3, "urls", evidenceUrl); // Tải URL ảnh bằng chứng
       Blynk.virtualWrite(V11, 1); // Bật nút "An Toàn" (xanh) cho người nhà
       Blynk.virtualWrite(V12, 1); // Bật nút "SOS" (đỏ) cho người nhà

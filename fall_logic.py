@@ -42,7 +42,7 @@ class FallLogicManager:
             
             # Nếu vượt quá ngưỡng 45s và chưa báo cáo
             if elapsed_time >= self.persistence_threshold and not self.track_states[track_id]['reported']:
-                self.trigger_alert(track_id, frame, elapsed_time)
+                self.trigger_alert(track_id, frame, elapsed_time, action_name)
                 self.track_states[track_id]['reported'] = True
             
             return 'Fall', elapsed_time
@@ -52,7 +52,7 @@ class FallLogicManager:
                 del self.track_states[track_id]
             return action_name, 0
 
-    def trigger_alert(self, track_id, frame, elapsed_time):
+    def trigger_alert(self, track_id, frame, elapsed_time, action_name):
         """
         Kích hoạt cảnh báo và chụp ảnh.
         """
@@ -64,8 +64,8 @@ class FallLogicManager:
         cv2.imwrite(filename, frame)
         print(f"[INFO] Đã lưu ảnh bằng chứng: {filename}")
         
-        # Gọi IoT Handler để báo cáo sang API server
-        self.iot_handler.report_fall(track_id, filename)
+        # Gọi IoT Handler để báo cáo sang API server kèm hành động
+        self.iot_handler.report_fall(track_id, filename, action=action_name)
 
 
     def cleanup_inactive_tracks(self, active_track_ids):

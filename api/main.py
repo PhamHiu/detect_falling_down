@@ -16,35 +16,73 @@ if not os.path.exists(STORAGE_DIR):
 # Mount thư mục storage để có thể truy cập ảnh qua URL
 app.mount("/evidence", StaticFiles(directory=STORAGE_DIR), name="evidence")
 
+from typing import Optional
+
 # Trạng thái hiện tại
 class FallStatus:
     def __init__(self):
         self.fall_detected = False
         self.fall_time = ""
         self.evidence_url = ""
-        self.cooldown_start_time: float = 0.0  # Thời điểm bắt đầu 5 phút khóa (tính từ khi ESP đọc được)
+        
+        # Safe mode properties
+        self.safe_mode: bool = False
+        self.safe_start_time: float = 0.0
+        self.safe_duration: float = 0.0  # in seconds internally
+        self.last_action: Optional[str] = None
 
-    def is_in_cooldown(self) -> bool:
-        """ Kiểm tra xem hiện tại có đang trong thời gian khóa 5 phút không """
-        return (time.time() - self.cooldown_start_time) < COOLDOWN_SECONDS
+    def start_cooldown(self, duration_minutes: float):
+        """ Kích hoạt độ an toàn (safe mode) """
+        self.safe_mode = True
+        self.safe_start_time = time.time()
+        self.safe_duration = duration_minutes * 60.0
+        self.fall_detected = False  # Reset cờ ngã khi vào mode an toàn
+        print(f"[API] Đã kích hoạt Safe Mode trong {duration_minutes} phút.")
 
-COOLDOWN_SECONDS = 5 * 60  # 5 phút = 300 giây
+    def stop_cooldown(self):
+        """ Hủy chế độ an toàn """
+        self.safe_mode = False
+        self.safe_start_time = 0.0
+        self.safe_duration = 0.0
+        print(f"[API] Đã tắt chế độ Safe Mode.")
+
+    def is_safe_mode(self) -> bool:
+        """ Kiểm tra xem hiện tại có đang trong thời gian an toàn không """
+        if not self.safe_mode:
+            return False
+            
+        elapsed = time.time() - self.safe_start_time
+        if elapsed < self.safe_duration:
+            return True
+        else:
+            # Hết thời gian an toàn, tự động tắt
+            self.stop_cooldown()
+            return False
+
+    def get_remaining_cooldown(self) -> float:
+        """ Lấy thời gian an toàn còn lại (giây) """
+        if not self.is_safe_mode():
+            return 0.0
+        return max(0.0, self.safe_duration - (time.time() - self.safe_start_time))
 
 current_status = FallStatus()
 
 @app.post("/report")
 async def report_fall(
     track_id: int = Form(...),
-    image: UploadFile = File(...)
+    image: UploadFile = File(...),
+    action: Optional[str] = Form(None)
 ):
     """
-    Endpoint dành cho AI báo cáo khi phát hiện ngã.
+    Endpoint dành cho AI báo cáo khi phát hiện ngã hoặc cập nhật action tĩnh.
     """
-    # Kiểm tra cooldown: Nếu đang trong thời gian khóa 5 phút thì bỏ qua
-    if current_status.is_in_cooldown():
-        remaining = int(COOLDOWN_SECONDS - (time.time() - current_status.cooldown_start_time))
-        print(f"[API] Đang trong cooldown 5 phút, bỏ qua báo cáo ngã ({remaining}s còn lại).")
-        return {"status": "skipped", "message": f"Cooldown active, {remaining}s remaining"}
+    current_status.last_action = action
+    
+    # Logic tự động tắt safe mode nếu ai đó đã khỏe và đứng dậy
+    if current_status.is_safe_mode():
+        if action and action not in ["Fall Down", "Lying Down", "Fall", "Lying"]:
+            print(f"[API] Phát hiện người dùng đã dậy (Action: {action}). Tự động tắt Safe Mode.")
+            current_status.stop_cooldown()
 
     # Lưu file ảnh
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -54,48 +92,63 @@ async def report_fall(
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(image.file, buffer)
     
-    # Cập nhật trạng thái (cooldown chưa bắt đầu tại đây, sẽ bắt đầu khi ESP đọc được)
+    # Cập nhật trạng thái ngã
     current_status.fall_detected = True
     current_status.fall_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     current_status.evidence_url = f"/evidence/{filename}"
     
-    print(f"[API] Đã nhận báo cáo ngã: ID {track_id}, Ảnh: {filename}")
+    print(f"[API] Đã nhận báo cáo ngã: ID {track_id}, Ảnh: {filename}, Action: {action}")
     
     return {"status": "success", "message": "Fall reported"}
 
-@app.get("/status")
-async def get_status():
+@app.get("/gate")
+async def get_gate_data():
     """
-    Endpoint dành cho ESP32 truy vấn trạng thái.
+    Endpoint cổng chính dành cho ESP32 lấy dữ liệu.
+    Dựa vào trạng thái cooldown sẽ trả về API tương ứng.
     """
-    # Lấy trạng thái hiện tại
-    detected = current_status.fall_detected
-    time_str = current_status.fall_time
-    evi_url = current_status.evidence_url
+    if current_status.is_safe_mode():
+        # Đang trong thời gian an toàn
+        remaining = current_status.get_remaining_cooldown()
+        return {
+            "type": "apiSendSafe",
+            "safe": True,
+            "safe_remaining_seconds": round(remaining, 1)
+        }
+    else:
+        # Không trong thời gian an toàn, trả về trạng thái ngã trực tiếp (không tự gạt cờ)
+        return {
+            "type": "apiSendFall",
+            "fall_detected": current_status.fall_detected,
+            "fall_time": current_status.fall_time,
+            "evidence": current_status.evidence_url
+        }
 
-    # Nếu ESP32 vừa nhận được thông tin ngã lần đầu tiên:
-    # -> Gạt cờ về False ngay lập tức
-    # -> KHỚI ĐỘNG đồng hồ khóa 5 phút (cooldown_start_time)
-    # Đảm bảo fall_detected luôn giữ mức False suốt 5 phút kế tiếp
-    if detected:
-        current_status.fall_detected = False
-        current_status.cooldown_start_time = time.time()  # Bắt đầu đồng hồ 5 phút
-        print(f"[API] ESP32 đã nhận tin ngã. Khóa cờ 5 phút bắt đầu.")
+class ResponseFromESP32(BaseModel):
+    safe: bool
+    safe_duration_minutes: float = 0.0
 
-    return {
-        "fall_detected": detected,
-        "fall_time": time_str,
-        "evidence": evi_url
-    }
+@app.post("/response-from-esp32")
+async def handle_esp32_response(data: ResponseFromESP32):
+    """
+    Endpoint để ESP32 phản hồi trạng thái an toàn của người dùng.
+    """
+    if data.safe:
+        current_status.start_cooldown(data.safe_duration_minutes)
+        return {"status": "success", "message": f"Safe mode activated for {data.safe_duration_minutes} minutes"}
+    else:
+        current_status.stop_cooldown()
+        return {"status": "success", "message": "Safe mode deactivated"}
 
 @app.post("/reset")
 async def reset_status():
     """
-    Endpoint để reset trạng thái (ví dụ sau khi đã xử lý xong).
+    Endpoint để reset trạng thái.
     """
     current_status.fall_detected = False
     current_status.fall_time = ""
     current_status.evidence_url = ""
+    current_status.stop_cooldown()
     return {"status": "success"}
 
 if __name__ == "__main__":

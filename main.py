@@ -61,7 +61,7 @@ if __name__ == '__main__':
     action_model = TSSTG(device=device)
 
     # Fall Logic Manager (unified states + 45s timer).
-    fall_manager = FallLogicManager(persistence_threshold=45)
+    fall_manager = FallLogicManager(persistence_threshold=10) #/////////////////////////////////////////////////////////////////////////////////////////////
 
     cam_source = args.camera
     if type(cam_source) is str and os.path.isfile(cam_source):

@@ -1,8 +1,3 @@
-// --- Blynk Credentials ---
-#define BLYNK_TEMPLATE_ID "TMPL6nXDjldOr"
-#define BLYNK_TEMPLATE_NAME "FallDetection"
-#define BLYNK_AUTH_TOKEN "KveCGf33u8V1WhImVQS2E3YHGdjnCSYy"
-
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
@@ -15,6 +10,10 @@
 #include "driver/i2s_common.h"
 
 
+// --- Blynk Credentials ---
+#define BLYNK_TEMPLATE_ID "TMPL6nXDjldOr"
+#define BLYNK_TEMPLATE_NAME "FallDetection"
+#define BLYNK_AUTH_TOKEN "KveCGf33u8V1WhImVQS2E3YHGdjnCSYy"
 
 // --- WiFi Credentials ---
 const char ssid[] = "Xiaomi";
@@ -31,6 +30,7 @@ const char *reset_url = "http://10.128.150.225:8000/reset";
 #define LEVEL_1_TIMEOUT 120000      // 2 phút
 #define LEVEL_2_TIMEOUT 300000      // 5 phút
 
+#endif
 
 // --- Audio Paths ---
 const char* AUDIO_FILE_1 = "/level1.mp3"; // File âm thanh cho Level 1 (Thẻ SD)
@@ -66,8 +66,15 @@ bool level1Notified = false;
 unsigned long level2StartTime = 0;
 bool level2Notified = false;
 
+// Sub-state cho LEVEL_1: phát audio → lắng nghe tuần tự
+enum Level1Phase { L1_PLAYING, L1_LISTENING };
+Level1Phase level1Phase = L1_PLAYING;
+unsigned long listeningStartTime = 0;
+const unsigned long LISTENING_WINDOW = 3000; // Lắng nghe 3 giây sau mỗi lần phát
+
 int blynk_v0_state = 0; // Lưu trạng thái nút V0 (I'm OK) trên blynk
-unsigned long lastV6Write = 0; // Timer cho việc giữ đèn V6 trong WAIT_FOR_BUTTON
+unsigned long lastV6Write =
+    0; // Timer cho việc giữ đèn V6 trong WAIT_FOR_BUTTON
 
 // Khởi tạo đối tượng Audio và I2S
 Audio audio;
@@ -135,23 +142,29 @@ void pauseApiRetrieval() {
 
 // BƯỚC 3: Hàm phát âm thanh dựa trên tệp trong thẻ SD
 void playAudio(int caseType) {
-  // Nếu đang phát chính file đó rồi thì không làm gì cả để tránh bị vấp (stutter)
+  // Nếu đang phát rồi thì không làm gì cả để tránh bị vấp (stutter)
   if (audio.isRunning()) return;
 
-  // BẬT Audio Enable (Mức logic LOW)
+  // Tắt I2S RX (mic) để tránh xung đột bus (speaker và mic dùng chung BCLK/LRCK)
+  i2s_channel_disable(rx_chan);
+
+  // BẬT Audio Enable (Mức logic LOW = enable)
   digitalWrite(I2S_EN_PIN, LOW);
 
   if (caseType == 1) {
     Serial.println("[AUDIO] Đang phát âm thanh Level 1 từ thẻ SD...");
-    audio.connecttoSD(AUDIO_FILE_1);
+    audio.connecttoFS(SD_MMC, AUDIO_FILE_1);
   } else if (caseType == 2) {
     Serial.println("[AUDIO] Đang phát còi hú SOS từ thẻ SD...");
-    audio.connecttoSD(AUDIO_FILE_2);
+    audio.connecttoFS(SD_MMC, AUDIO_FILE_2);
   }
 }
 
 // BƯỚC 4: Hàm ghi âm thanh bằng mic của esp và kiểm tra cường độ
 bool checkVoiceCommand() {
+  // Bật I2S RX (mic) — đảm bảo mic sẵn sàng trước khi đọc
+  i2s_channel_enable(rx_chan);
+
   size_t bytes_read = 0;
   int16_t i2s_raw_buffer[512];
   
@@ -163,7 +176,7 @@ bool checkVoiceCommand() {
     }
     float average_amplitude = sum / (bytes_read / 2.0);
     
-    // Nếu cường độ âm thanh vượt ngưỡng (giả lập phát hiện tiếng nói "tôi ổn")
+    // Nếu cường độ âm thanh vượt ngưỡng → coi như xác nhận "tôi ổn"
     if (average_amplitude > 1500) { 
         Serial.printf("[MIC] Phát hiện âm thanh cường độ cao: %.2f\n", average_amplitude);
         return true; 
@@ -175,7 +188,7 @@ bool checkVoiceCommand() {
 // Hàm khởi tạo I2S cho Ghi âm (RX) - Sử dụng I2S_NUM_1 để tránh xung đột với Audio library (I2S_NUM_0)
 void initI2SRecording() {
     // ESP32-S3 có 2 bộ I2S. Audio library dùng I2S_NUM_0, ta dùng I2S_NUM_1 cho Mic.
-    i2s_chan_config_t chan_cfg = I2S_CHAN_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
     i2s_new_channel(&chan_cfg, NULL, &rx_chan);
 
     i2s_std_config_t std_cfg = {
@@ -190,7 +203,7 @@ void initI2SRecording() {
             .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false }
         },
     };
-    i2s_channel_init_std_rx(rx_chan, &std_cfg);
+    i2s_channel_init_std_mode(rx_chan, &std_cfg);
     i2s_channel_enable(rx_chan);
     Serial.println("[HỆ THỐNG] Đã khởi tạo I2S Recording (NUM_1) thành công.");
 }
@@ -255,6 +268,7 @@ void handleStateLogic() {
   switch (currentState) {
 
   // ── GIAI ĐOẠN 1: PHÁT HIỆN NGÃ, NẠN NHÂN CÒN NHẬN THỨC ──
+  // Logic tuần tự: Phát audio → Lắng nghe 3s → Lặp lại (trong 2 phút)
   case LEVEL_1: {
     // Thông báo 1 lần duy nhất khi mới vào Level 1
     if (!level1Notified) {
@@ -264,24 +278,43 @@ void handleStateLogic() {
                          1); // Bật nút I'm OK (đỏ) — nạn nhân gạt về 0 nếu ổn
       Blynk.virtualWrite(V10, 1); // Bật nút Gọi Cấp Cứu (Level 1)
       level1Notified = true;
+      level1Phase = L1_PLAYING; // Bắt đầu bằng phát audio
     }
 
-    // Trong vòng 2 phút (120,000 ms): phát âm thanh + lắng nghe giọng nói
+    // Trong vòng 2 phút (120,000 ms): chu kỳ phát audio → lắng nghe
     if (millis() - level1StartTime < 120000) {
-      playAudio(1); // Phát âm thanh cảnh báo Level 1
-      bool saySafe =
-          checkVoiceCommand(); // Ghi âm và đối chiếu "tôi ổn" (Non-blocking)
 
-      if (saySafe) {
-        Serial.println("[LEVEL 1] Xác nhận an toàn từ giọng nói!");
-        pauseApiRetrieval();
-        resetSystem();
+      if (level1Phase == L1_PLAYING) {
+        // === PHASE 1: Phát audio cảnh báo ===
+        playAudio(1);
+        // Khi audio phát xong → chuyển sang lắng nghe
+        if (!audio.isRunning() && level1Notified) {
+          level1Phase = L1_LISTENING;
+          listeningStartTime = millis();
+          Serial.println("[LEVEL 1] Audio xong, bắt đầu lắng nghe...");
+        }
+      } else if (level1Phase == L1_LISTENING) {
+        // === PHASE 2: Lắng nghe mic (3 giây) ===
+        bool saySafe = checkVoiceCommand();
+        if (saySafe) {
+          Serial.println("[LEVEL 1] Xác nhận an toàn từ giọng nói!");
+          i2s_channel_disable(rx_chan); // Tắt mic
+          resetSystem();
+          break;
+        }
+        // Hết cửa sổ lắng nghe 3s → phát lại audio
+        if (millis() - listeningStartTime >= LISTENING_WINDOW) {
+          Serial.println("[LEVEL 1] Không phát hiện phản hồi, phát lại audio...");
+          level1Phase = L1_PLAYING;
+        }
       }
+
       // Xử lý nút V0 (I'm OK) và V10 (Gọi Cấp Cứu) do BLYNK_WRITE() đảm nhiệm
     } else {
       // Hết 2 phút không phản hồi → Chuyển qua LEVEL 2
       Serial.println("[LEVEL 1] Hết 2 phút, nạn nhân không phản hồi. Chuyển "
                      "sang LEVEL 2.");
+      i2s_channel_disable(rx_chan); // Tắt mic khi rời LEVEL_1
       currentState = LEVEL_2;
       level2StartTime = millis();
       level2Notified = false;
@@ -412,7 +445,7 @@ void setup() {
     audio.setPinout(I2S_BCLK_PIN, I2S_LRCK_PIN, I2S_DOUT_PIN);
     audio.setVolume(21); // Âm lượng tối đa
     
-    // Cấu hình chân SDIO cho ESP32-S3 (IO38, IO40, IO39, IO41, IO48, IO47)
+    // Cấu hình chân SDIO cho ESP32-S3
     SD_MMC.setPins(38, 40, 39, 41, 48, 47);
     if (!SD_MMC.begin("/sdcard", false)) { // false = 4-bit mode
       Serial.println("[LỖI] Không thể mount thẻ nhớ SD!");
@@ -460,7 +493,7 @@ void loop() {
   // Cập nhật Audio và Loa
   audio.loop();
 
-  // Tắt Audio EN khi không phát nữa (optional)
+  // Tắt Audio EN khi không phát nữa
   static bool lastRunning = false;
   bool isRunning = audio.isRunning();
   if (lastRunning && !isRunning) {

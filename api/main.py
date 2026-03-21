@@ -83,6 +83,11 @@ async def report_fall(
         if action and action not in ["Fall Down", "Lying Down", "Fall", "Lying"]:
             print(f"[API] Phát hiện người dùng đã dậy (Action: {action}). Tự động tắt Safe Mode.")
             current_status.stop_cooldown()
+            current_status.fall_detected = False
+            return {"status": "success", "message": "Safe mode disabled because user is up"}
+        else:
+            print(f"[API] Đang trong Safe Mode: Bỏ qua báo cáo ngã từ ID {track_id}")
+            return {"status": "success", "message": "Ignored fall during safe mode"}
 
     # Lưu file ảnh
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

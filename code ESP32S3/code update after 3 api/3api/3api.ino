@@ -115,7 +115,9 @@ void checkApiStatus() {
 
       String typeStr = doc["type"].as<String>();
       bool fallDetected = doc["fall_detected"];
-      // check typeStr ádfasfasdfdsafseadfasdefasdfsadfasdfsadfasdfdsaf
+      if (currentState == IDLE) {
+        Serial.println("[HỆ THỐNG] Đang trong trạng thái AN TOÀN. ");
+      }
       if (typeStr == "apiSendSafe") {
         float remaining_seconds = doc["safe_remaining_seconds"].as<float>();
         Blynk.virtualWrite(V5, remaining_seconds);
@@ -507,7 +509,8 @@ void setup() {
     audio.setPinout(I2S_BCLK_PIN, I2S_LRCK_PIN, I2S_DOUT_PIN);
     audio.setVolume(21); // Âm lượng tối đa
 
-    // Cấu hình chân SDIO cho ESP32-S3
+    // Cấu hình chân SDIO cho ESP32-S3 ==> khả năng đang sai chân pin cần
+    // check lại
     SD_MMC.setPins(38, 40, 39, 41, 48, 47);
     if (!SD_MMC.begin("/sdcard", false)) { // false = 4-bit mode
       Serial.println("[LỖI] Không thể mount thẻ nhớ SD!");
@@ -519,8 +522,8 @@ void setup() {
 
     // Cấu hình Blynk (KHÔNG BLOCK HỆ THỐNG nếu WiFi rớt)
     Blynk.config(BLYNK_AUTH_TOKEN);
-    Blynk
-        .connect(); // Sẽ cố gắng connect, nếu không được vẫn thoát ra chay tiep
+    Blynk.connect(); // Sẽ cố gắng connect, nếu không được vẫn thoát ra chay
+                     // tiep
     Serial.println("Hệ thống khởi động hoàn tất!");
 
   } else {

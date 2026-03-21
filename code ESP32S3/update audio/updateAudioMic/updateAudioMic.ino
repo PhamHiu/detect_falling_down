@@ -1,19 +1,20 @@
+#define BLYNK_TEMPLATE_ID "TMPL6nXDjldOr"
+#define BLYNK_TEMPLATE_NAME "FallDetection"
+#define BLYNK_AUTH_TOKEN "KveCGf33u8V1WhImVQS2E3YHGdjnCSYy"
 
+#include "Audio.h"
+#include "SD_MMC.h"
+#include "driver/i2s_common.h"
+#include "driver/i2s_std.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <BlynkSimpleEsp32.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
-#include "Audio.h"
-#include "SD_MMC.h"
-#include "driver/i2s_std.h"
-#include "driver/i2s_common.h"
 
 
 // --- Blynk Credentials ---
-#define BLYNK_TEMPLATE_ID "TMPL6nXDjldOr"
-#define BLYNK_TEMPLATE_NAME "FallDetection"
-#define BLYNK_AUTH_TOKEN "KveCGf33u8V1WhImVQS2E3YHGdjnCSYy"
+
 
 // --- WiFi Credentials ---
 const char ssid[] = "Xiaomi";
@@ -22,7 +23,7 @@ const char pass[] = "12345679@";
 // --- API Server Settings ---
 // LƯU Ý: Thay đổi IP này thành IP máy tính của bạn (chạy FastAPI)
 // Ví dụ: "http://192.168.1.10:8000"
-const char *server_url = "http://10.128.150.225:8000/status";
+const char *server_url = "http://10.128.150.225:8000/gate";
 const char *reset_url = "http://10.128.150.225:8000/reset";
 
 // --- Notification Settings ---
@@ -30,11 +31,25 @@ const char *reset_url = "http://10.128.150.225:8000/reset";
 #define LEVEL_1_TIMEOUT 120000      // 2 phút
 #define LEVEL_2_TIMEOUT 300000      // 5 phút
 
-#endif
+
+// Note off my tssk in 21/3/2026
+/**
+ i will update user interface to connect with code 3 api
+ i will  creat al new slider to control safe duration
+ next i will  creat a new button to control the system v5
+ last this is fixx the picture not show in user interface and connect audio and
+ microphone  to system
+
+ you will remember this
+ continue to break promblem from big step to esayest step . this is a think you
+ can make now on your power. this is a good way to solve promblem  :)))
+
+ ok let sleep now :)))
+ */
 
 // --- Audio Paths ---
-const char* AUDIO_FILE_1 = "/level1.mp3"; // File âm thanh cho Level 1 (Thẻ SD)
-const char* AUDIO_FILE_2 = "/level2.mp3"; // File âm thanh cho Level 2 (Thẻ SD)
+const char *AUDIO_FILE_1 = "/level1.mp3"; // File âm thanh cho Level 1 (Thẻ SD)
+const char *AUDIO_FILE_2 = "/level2.mp3"; // File âm thanh cho Level 2 (Thẻ SD)
 
 // Bảng chân I2S cho Audio (Tham chiếu)
 #define I2S_EN_PIN 1
@@ -57,9 +72,7 @@ String fallTimeStr = "";
 String evidenceUrl = "";
 
 // Các cờ và biến thời gian
-bool isApiPaused = false;
-unsigned long apiPauseStartTime = 0;
-const unsigned long API_PAUSE_DURATION = 15 * 60 * 1000; // 15 phút
+float custom_safe_duration = 0.0; // Lưu trữ thời gian safe từ Blynk
 
 unsigned long level1StartTime = 0;
 bool level1Notified = false;
@@ -70,7 +83,8 @@ bool level2Notified = false;
 enum Level1Phase { L1_PLAYING, L1_LISTENING };
 Level1Phase level1Phase = L1_PLAYING;
 unsigned long listeningStartTime = 0;
-const unsigned long LISTENING_WINDOW = 3000; // Lắng nghe 3 giây sau mỗi lần phát
+const unsigned long LISTENING_WINDOW =
+    3000; // Lắng nghe 3 giây sau mỗi lần phát
 
 int blynk_v0_state = 0; // Lưu trạng thái nút V0 (I'm OK) trên blynk
 unsigned long lastV6Write =
@@ -85,7 +99,7 @@ String SDT[] = {"0123456789", "0987654321"};
 
 // Khai báo hàm
 void checkApiStatus();
-void pauseApiRetrieval();
+void sendSafeStatusToServer();
 void playAudio(int caseType);
 bool checkVoiceCommand();
 void resetSystem();
@@ -105,9 +119,10 @@ void checkApiStatus() {
       JsonDocument doc;
       deserializeJson(doc, payload);
 
+      String typeStr = doc["type"].as<String>();
       bool fallDetected = doc["fall_detected"];
 
-      if (fallDetected && currentState == IDLE) {
+      if (typeStr == "apiSendFall" && fallDetected && currentState == IDLE) {
         fallTimeStr = doc["fall_time"].as<String>();
 
         // Lấy domain gốc (cắt bỏ phần đuôi đằng sau mốc Port :8000)
@@ -133,19 +148,44 @@ void checkApiStatus() {
   }
 }
 
-// BƯỚC 2: Hàm không truy xuất API trong 15 phút
-void pauseApiRetrieval() {
-  isApiPaused = true;
-  apiPauseStartTime = millis();
-  Serial.println("[HỆ THỐNG] Tạm dừng truy xuất API trong 15 phút.");
+// BƯỚC 2: Hàm thực hiện POST xác nhận an toàn lên Server API
+void sendSafeStatusToServer() {
+  if (WiFi.status() == WL_CONNECTED) {
+    String baseUrl = String(server_url);
+    int portIndex = baseUrl.indexOf(":8000");
+    if (portIndex > 0) {
+      baseUrl = baseUrl.substring(0, portIndex + 5);
+    }
+    String postUrl = baseUrl + "/response-from-esp32";
+
+    HTTPClient http;
+    http.begin(postUrl);
+    http.addHeader("Content-Type", "application/json");
+
+    String payload = "{\"safe\": true, \"safe_duration_minutes\": " +
+                     String(custom_safe_duration) + "}";
+
+    int httpCode = http.POST(payload);
+    if (httpCode > 0) {
+      Serial.printf("[API] Đã gửi xác nhận an toàn lên Server API (%.1f phút), "
+                    "code: %d\n",
+                    custom_safe_duration, httpCode);
+    } else {
+      Serial.printf("[API] Lỗi khi gửi xác nhận an toàn: %s\n",
+                    http.errorToString(httpCode).c_str());
+    }
+    http.end();
+  }
 }
 
 // BƯỚC 3: Hàm phát âm thanh dựa trên tệp trong thẻ SD
 void playAudio(int caseType) {
   // Nếu đang phát rồi thì không làm gì cả để tránh bị vấp (stutter)
-  if (audio.isRunning()) return;
+  if (audio.isRunning())
+    return;
 
-  // Tắt I2S RX (mic) để tránh xung đột bus (speaker và mic dùng chung BCLK/LRCK)
+  // Tắt I2S RX (mic) để tránh xung đột bus (speaker và mic dùng chung
+  // BCLK/LRCK)
   i2s_channel_disable(rx_chan);
 
   // BẬT Audio Enable (Mức logic LOW = enable)
@@ -166,46 +206,53 @@ bool checkVoiceCommand() {
   i2s_channel_enable(rx_chan);
 
   size_t bytes_read = 0;
-  int16_t i2s_raw_buffer[512];
-  
+  int16_t i2s_raw_buffer[512];      
+
   // Đọc dữ liệu từ I2S RX
-  if (i2s_channel_read(rx_chan, i2s_raw_buffer, sizeof(i2s_raw_buffer), &bytes_read, 100) == ESP_OK) {
+  if (i2s_channel_read(rx_chan, i2s_raw_buffer, sizeof(i2s_raw_buffer),
+                       &bytes_read, 100) == ESP_OK) {
     long sum = 0;
     for (int i = 0; i < bytes_read / 2; i++) {
-        sum += abs(i2s_raw_buffer[i]);
+      sum += abs(i2s_raw_buffer[i]);
     }
     float average_amplitude = sum / (bytes_read / 2.0);
-    
+
     // Nếu cường độ âm thanh vượt ngưỡng → coi như xác nhận "tôi ổn"
-    if (average_amplitude > 1500) { 
-        Serial.printf("[MIC] Phát hiện âm thanh cường độ cao: %.2f\n", average_amplitude);
-        return true; 
+    if (average_amplitude > 1500) {
+      Serial.printf("[MIC] Phát hiện âm thanh cường độ cao: %.2f\n",
+                    average_amplitude);
+      return true;
     }
   }
   return false;
 }
 
-// Hàm khởi tạo I2S cho Ghi âm (RX) - Sử dụng I2S_NUM_1 để tránh xung đột với Audio library (I2S_NUM_0)
+// Hàm khởi tạo I2S cho Ghi âm (RX) - Sử dụng I2S_NUM_1 để tránh xung đột với
+// Audio library (I2S_NUM_0)
 void initI2SRecording() {
-    // ESP32-S3 có 2 bộ I2S. Audio library dùng I2S_NUM_0, ta dùng I2S_NUM_1 cho Mic.
-    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
-    i2s_new_channel(&chan_cfg, NULL, &rx_chan);
+  // ESP32-S3 có 2 bộ I2S. Audio library dùng I2S_NUM_0, ta dùng I2S_NUM_1 cho
+  // Mic.
+  i2s_chan_config_t chan_cfg =
+      I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
+  i2s_new_channel(&chan_cfg, NULL, &rx_chan);
 
-    i2s_std_config_t std_cfg = {
-        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(16000), // Sample rate 16kHz cho ghi âm
-        .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
-        .gpio_cfg = {
-            .mclk = I2S_GPIO_UNUSED, // Mic thường không cần MCLK
-            .bclk = (gpio_num_t)I2S_BCLK_PIN,
-            .ws   = (gpio_num_t)I2S_LRCK_PIN,
-            .dout = I2S_GPIO_UNUSED,
-            .din  = (gpio_num_t)I2S_DIN_PIN,
-            .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false }
-        },
-    };
-    i2s_channel_init_std_mode(rx_chan, &std_cfg);
-    i2s_channel_enable(rx_chan);
-    Serial.println("[HỆ THỐNG] Đã khởi tạo I2S Recording (NUM_1) thành công.");
+  i2s_std_config_t std_cfg = {
+      .clk_cfg =
+          I2S_STD_CLK_DEFAULT_CONFIG(16000), // Sample rate 16kHz cho ghi âm
+      .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
+                                                  I2S_SLOT_MODE_MONO),
+      .gpio_cfg = {.mclk = I2S_GPIO_UNUSED, // Mic thường không cần MCLK
+                   .bclk = (gpio_num_t)I2S_BCLK_PIN,
+                   .ws = (gpio_num_t)I2S_LRCK_PIN,
+                   .dout = I2S_GPIO_UNUSED,
+                   .din = (gpio_num_t)I2S_DIN_PIN,
+                   .invert_flags = {.mclk_inv = false,
+                                    .bclk_inv = false,
+                                    .ws_inv = false}},
+  };
+  i2s_channel_init_std_mode(rx_chan, &std_cfg);
+  i2s_channel_enable(rx_chan);
+  Serial.println("[HỆ THỐNG] Đã khởi tạo I2S Recording (NUM_1) thành công.");
 }
 
 // BƯỚC 5: Hàm reset về trạng thái ban đầu cho hệ thống
@@ -299,12 +346,14 @@ void handleStateLogic() {
         if (saySafe) {
           Serial.println("[LEVEL 1] Xác nhận an toàn từ giọng nói!");
           i2s_channel_disable(rx_chan); // Tắt mic
+          sendSafeStatusToServer();     // Gửi trạng thái an toàn lên API
           resetSystem();
           break;
         }
         // Hết cửa sổ lắng nghe 3s → phát lại audio
         if (millis() - listeningStartTime >= LISTENING_WINDOW) {
-          Serial.println("[LEVEL 1] Không phát hiện phản hồi, phát lại audio...");
+          Serial.println(
+              "[LEVEL 1] Không phát hiện phản hồi, phát lại audio...");
           level1Phase = L1_PLAYING;
         }
       }
@@ -374,8 +423,8 @@ BLYNK_WRITE(V0) {
   if (blynk_v0_state == 0 && currentState == LEVEL_1) {
     Serial.println(
         "[LEVEL 1] Nạn nhân xác nhận AN TOÀN qua nút I'm OK trên Blynk!");
-    pauseApiRetrieval(); // Tạm dừng truy xuất API 15 phút
-    resetSystem();       // Đưa hệ thống về IDLE
+    sendSafeStatusToServer(); // Gửi trạng thái an toàn lên API
+    resetSystem();            // Đưa hệ thống về IDLE
   }
 }
 
@@ -392,7 +441,7 @@ BLYNK_WRITE(V11) {
   if (param.asInt() == 1 && currentState == LEVEL_2) {
     Serial.println("[LEVEL 2] Người nhà xác nhận AN TOÀN qua V11!");
     Blynk.virtualWrite(V12, 0); // Tắt nút SOS còn lại
-    pauseApiRetrieval();        // Tạm dừng truy xuất API 15 phút
+    sendSafeStatusToServer();   // Gửi trạng thái an toàn lên API
     resetSystem();              // Đưa hệ thống về IDLE
   }
 }
@@ -403,6 +452,13 @@ BLYNK_WRITE(V12) {
     Serial.println("[LEVEL 2] Người nhà chủ động kích hoạt SOS qua V12!");
     triggerSOS(); // Gọi SOS và chuyển sang WAIT_FOR_BUTTON
   }
+}
+
+// [V5] Nhận thời gian an toàn tùy chỉnh từ Blynk Slider/Numeric Input
+BLYNK_WRITE(V5) {
+  custom_safe_duration = param.asFloat();
+  Serial.printf("[BLYNK] Đã cập nhật thời gian an toàn tùy chỉnh: %.1f phút\n",
+                custom_safe_duration);
 }
 
 // [V6] Đèn SOS khẩn cấp — Người nhà xác nhận đã biết, reset hệ thống
@@ -444,7 +500,7 @@ void setup() {
     // --- Khởi tạo Audio & SD Card & I2S Recording ---
     audio.setPinout(I2S_BCLK_PIN, I2S_LRCK_PIN, I2S_DOUT_PIN);
     audio.setVolume(21); // Âm lượng tối đa
-    
+
     // Cấu hình chân SDIO cho ESP32-S3
     SD_MMC.setPins(38, 40, 39, 41, 48, 47);
     if (!SD_MMC.begin("/sdcard", false)) { // false = 4-bit mode
@@ -470,18 +526,9 @@ void setup() {
 void loop() {
   Blynk.run();
 
-  // BƯỚC 2: Kiểm tra cờ tạm dừng truy xuất API (15 phút)
-  if (isApiPaused) {
-    if (millis() - apiPauseStartTime > API_PAUSE_DURATION) {
-      isApiPaused = false;
-      Serial.println(
-          "[HỆ THỐNG] Đã hết 15 phút tạm dừng API. Bắt đầu theo dõi lại.");
-    }
-  }
-
-  // Kiểm tra API mỗi 2 giây nếu đang ở trạng thái IDLE và không bị tạm dừng
+  // Kiểm tra API mỗi 2 giây nếu đang ở trạng thái IDLE
   static unsigned long lastApiCheck = 0;
-  if (!isApiPaused && (millis() - lastApiCheck > 2000)) {
+  if (millis() - lastApiCheck > 2000) {
     lastApiCheck = millis();
     if (currentState == IDLE) {
       checkApiStatus();
@@ -489,7 +536,7 @@ void loop() {
   }
 
   handleStateLogic();
-  
+
   // Cập nhật Audio và Loa
   audio.loop();
 

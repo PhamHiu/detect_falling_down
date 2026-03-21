@@ -84,11 +84,14 @@ void checkApiStatus() {
       String typeStr = doc["type"].as<String>();
       bool fallDetected = doc["fall_detected"];
 
+      if (currentState == IDLE) {
+        Serial.println("[HỆ THỐNG] Đang trong trạng thái AN TOÀN. ");
+      }
       if (typeStr == "apiSendSafe") {
         float remaining_seconds = doc["safe_remaining_seconds"].as<float>();
-        Serial.printf("[HỆ THỐNG] Đang trong trạng thái AN TOÀN. Thời gian duy "
-                      "trì còn lại: %.1f giây\n",
-                      remaining_seconds);
+        Blynk.virtualWrite(V5, remaining_seconds);
+        Serial.printf("Thời gian duy trì còn lại: %.1f phút\n",
+                      remaining_seconds / 60);
       } else if (typeStr == "apiSendFall" && fallDetected &&
                  currentState == IDLE) {
         fallTimeStr = doc["fall_time"].as<String>();
@@ -106,7 +109,9 @@ void checkApiStatus() {
         level1StartTime = millis();
         level1Notified = false; // Reset cờ thông báo lúc rơi ngã
 
-        Serial.println("[CẢNH BÁO] Phát hiện ngã từ API Server!");
+        Serial.println("[CẢNH BÁO] Phát hiện có người bị ngã trong nhà ");
+        Serial.println("Thời gian: ");
+        Serial.println(fallTimeStr);
       }
     } else {
       Serial.printf("[API] GET failed, error: %s (Code: %d)\n",
@@ -229,36 +234,42 @@ void sendSOS() {
     http.begin(client, url);
     http.addHeader("Content-Type", "application/json");
 
-    String textMsg = "🚨 *CẢNH BÁO PHÁT HIỆN NGÃ!* 🚨\n"
-                     "⏰ *Thời gian:* " +
+    // FIX 1: Chuyển sang định dạng HTML để an toàn với các ký tự đặc biệt trong
+    // Link/Thời gian
+    String textMsg = "🚨 <b>CẢNH BÁO PHÁT HIỆN NGÃ!</b> 🚨\n"
+                     "⏰ <b>Thời gian:</b> " +
                      fallTimeStr +
                      "\n"
-                     "📍 *Địa chỉ:* " +
+                     "📍 <b>Địa chỉ:</b> " +
                      String(DIA_CHI_NHA) +
                      "\n"
-                     "📞 *SDT Người thân:* " +
+                     "📞 <b>SDT Người thân:</b> " +
                      SDT[0] + " / " + SDT[1] +
                      "\n"
-                     "📸 *Bằng chứng:* " +
-                     evidenceUrl;
+                     "📸 <b>Trạng thái hiện tại:</b> <a href='" +
+                     evidenceUrl + "'>Nhấn vào đây để xem ảnh</a>";
 
-    Serial.println(textMsg);
+    Serial.println("Nội dung chuẩn bị gửi:\n" + textMsg);
 
     JsonDocument doc;
     doc["chat_id"] = TELEGRAM_CHAT_ID;
     doc["text"] = textMsg;
-    doc["parse_mode"] = "Markdown";
+    doc["parse_mode"] = "HTML"; // FIX 2: Báo cho Telegram biết mình dùng HTML
 
     String payload;
     serializeJson(doc, payload);
 
     int httpResponseCode = http.POST(payload);
-    if (httpResponseCode > 0) {
-      Serial.printf("[TELEGRAM] Đã gửi SOS thành công, HTTP Code: %d\n",
-                    httpResponseCode);
+
+    // FIX 3: In ra chi tiết phản hồi từ Telegram để dễ bắt bệnh nếu còn lỗi
+    if (httpResponseCode == 200) {
+      Serial.println("[TELEGRAM] Đã gửi tin nhắn SOS thành công!");
     } else {
-      Serial.printf("[TELEGRAM] Lỗi gửi SOS, Error: %s\n",
-                    http.errorToString(httpResponseCode).c_str());
+      Serial.printf("[TELEGRAM] Lỗi gửi SOS, HTTP Code: %d\n",
+                    httpResponseCode);
+      String response =
+          http.getString(); // Lấy câu trả lời chi tiết của server Telegram
+      Serial.println("Chi tiết lỗi từ Telegram: " + response);
     }
     http.end();
   } else {

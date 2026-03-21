@@ -114,9 +114,8 @@ void checkApiStatus() {
       if (typeStr == "apiSendSafe") {
         float remaining_seconds = doc["safe_remaining_seconds"].as<float>();
         Blynk.virtualWrite(V5, remaining_seconds);
-        Serial.printf("[HỆ THỐNG] Đang trong trạng thái AN TOÀN. Thời gian duy "
-                      "trì còn lại: %.1f giây\n",
-                      remaining_seconds);
+        Serial.printf("Thời gian duy trì còn lại: %.1f phút\n",
+                      remaining_seconds / 60);
       } else if (typeStr == "apiSendFall" && fallDetected &&
                  currentState == IDLE) {
         fallTimeStr = doc["fall_time"].as<String>();
@@ -186,7 +185,8 @@ void triggerXiaozhi() {
     if (httpCode > 0) {
       Serial.println("[LEVEL 1] Đã gửi lệnh cảnh báo cho Xiaozhi thành công.");
     } else {
-      Serial.printf("[LEVEL 1] Lỗi gọi Xiaozhi: %s\n", http.errorToString(httpCode).c_str());
+      Serial.printf("[LEVEL 1] Lỗi gọi Xiaozhi: %s\n",
+                    http.errorToString(httpCode).c_str());
     }
     http.end();
   }
@@ -210,7 +210,8 @@ void setupWebServer() {
   server.on("/safe", HTTP_GET, handleSafeFromXiaozhi);
   server.on("/sos", HTTP_GET, handleSOSFromXiaozhi);
   server.begin();
-  Serial.println("[HỆ THỐNG] WebServer nội bộ đã khởi chạy ở cổng 80 cho Xiaozhi.");
+  Serial.println(
+      "[HỆ THỐNG] WebServer nội bộ đã khởi chạy ở cổng 80 cho Xiaozhi.");
 }
 
 // BƯỚC 5: Hàm reset về trạng thái ban đầu cho hệ thống
@@ -247,49 +248,62 @@ void resetSystem() {
 // BƯỚC 9: Xây dựng hàm SOS() — Gửi qua Telegram
 void sendSOS() {
   Serial.println("==================================");
-  Serial.println("THỰC HIỆN GỬI SOS ĐẾN CƠ QUAN Y TẾ VÀ NGƯỜI NHÀ QUA TELEGRAM");
+  Serial.println(
+      "THỰC HIỆN GỬI SOS ĐẾN CƠ QUAN Y TẾ VÀ NGƯỜI NHÀ QUA TELEGRAM");
 
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
     WiFiClientSecure client;
     client.setInsecure(); // Bỏ qua SSL Certificate do Telegram dùng HTTPS
-    
-    String url = "https://api.telegram.org/bot" + String(TELEGRAM_BOT_TOKEN) + "/sendMessage";
+
+    String url = "https://api.telegram.org/bot" + String(TELEGRAM_BOT_TOKEN) +
+                 "/sendMessage";
     http.begin(client, url);
     http.addHeader("Content-Type", "application/json");
-    
-    String textMsg = "🚨 *CẢNH BÁO PHÁT HIỆN NGÃ!* 🚨\n"
-                     "⏰ *Thời gian:* " + fallTimeStr + "\n"
-                     "📍 *Địa chỉ:* " + String(DIA_CHI_NHA) + "\n"
-                     "📞 *SDT Người thân:* " + SDT[0] + " / " + SDT[1] + "\n"
-                     "📸 *Bằng chứng:* " + evidenceUrl;
-                     
-    Serial.println(textMsg);
-    
+
+    // FIX 1: Chuyển sang định dạng HTML để an toàn với các ký tự đặc biệt trong
+    // Link/Thời gian
+    String textMsg = "🚨 <b>CẢNH BÁO PHÁT HIỆN NGÃ!</b> 🚨\n"
+                     "⏰ <b>Thời gian:</b> " +
+                     fallTimeStr +
+                     "\n"
+                     "📍 <b>Địa chỉ:</b> " +
+                     String(DIA_CHI_NHA) +
+                     "\n"
+                     "📞 <b>SDT Người thân:</b> " +
+                     SDT[0] + " / " + SDT[1] +
+                     "\n"
+                     "📸 <b>Trạng thái hiện tại:</b> <a href='" +
+                     evidenceUrl + "'>Nhấn vào đây để xem ảnh</a>";
+
+    Serial.println("Nội dung chuẩn bị gửi:\n" + textMsg);
+
     JsonDocument doc;
     doc["chat_id"] = TELEGRAM_CHAT_ID;
     doc["text"] = textMsg;
-    doc["parse_mode"] = "Markdown";
-    
+    doc["parse_mode"] = "HTML"; // FIX 2: Báo cho Telegram biết mình dùng HTML
+
     String payload;
     serializeJson(doc, payload);
-    
+
     int httpResponseCode = http.POST(payload);
-    if (httpResponseCode > 0) {
-      Serial.printf("[TELEGRAM] Đã gửi SOS thành công, HTTP Code: %d\n", httpResponseCode);
+
+    // FIX 3: In ra chi tiết phản hồi từ Telegram để dễ bắt bệnh nếu còn lỗi
+    if (httpResponseCode == 200) {
+      Serial.println("[TELEGRAM] Đã gửi tin nhắn SOS thành công!");
     } else {
-      Serial.printf("[TELEGRAM] Lỗi gửi SOS, Error: %s\n", http.errorToString(httpResponseCode).c_str());
+      Serial.printf("[TELEGRAM] Lỗi gửi SOS, HTTP Code: %d\n",
+                    httpResponseCode);
+      String response =
+          http.getString(); // Lấy câu trả lời chi tiết của server Telegram
+      Serial.println("Chi tiết lỗi từ Telegram: " + response);
     }
     http.end();
   } else {
     Serial.println("[LỖI] Không có kết nối WiFi để gửi Telegram SOS!");
   }
   Serial.println("==================================");
-  // Sau khi gửi SOS, nơi gọi hàm phải set currentState = WAIT_FOR_BUTTON
-  // Việc bật V6 liên tục sẽ do handleStateLogic() xử lý (non-blocking)
 }
-
-// Wrapper tiện ích: Gọi SOS và chuyển sang trạng thái chờ xác nhận
 void triggerSOS() {
   sendSOS();
   currentState = WAIT_FOR_BUTTON;
@@ -320,11 +334,13 @@ void handleStateLogic() {
       if (level1Phase == L1_PLAYING) {
         // === GỌI XIAOZHI ===
         triggerXiaozhi();
-        level1Phase = L1_LISTENING; // Chờ Xiaozhi trả kết quả ngầm qua WebServer
+        level1Phase =
+            L1_LISTENING; // Chờ Xiaozhi trả kết quả ngầm qua WebServer
       }
 
-      // Quá trình lắng nghe kết quả an toàn / báo khẩn cấp xử lý bằng ngầm WebServer (loop)
-      
+      // Quá trình lắng nghe kết quả an toàn / báo khẩn cấp xử lý bằng ngầm
+      // WebServer (loop)
+
       // Xử lý nút V0 (I'm OK) và V4 (Gọi Cấp Cứu) do BLYNK_WRITE() đảm nhiệm
     } else {
       // Hết 2 phút không có tín hiệu HTTP gọi về → Chuyển qua LEVEL 2

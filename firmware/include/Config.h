@@ -21,4 +21,10 @@ const char *reset_url = "http://10.128.150.225:8000/reset";
 #define LEVEL_1_TIMEOUT 120000      // 2 phút
 #define LEVEL_2_TIMEOUT 300000      // 5 phút
 
+// --- Telegram & Xiaozhi AI Settings ---
+#define TELEGRAM_BOT_TOKEN "8271771967:AAHmku0WWhAZnFm-GALfTEhB80FSmkwLKXQ"
+#define TELEGRAM_CHAT_ID "5348036208"
+#define DIA_CHI_NHA "Nhà số 123, Đường ABC, Quận XYZ, TP. Hà Nội"
+#define XIAOZHI_ALERT_URL "http://192.168.1.100/alert" // Thay IP Xiaozhi
+
 #endif

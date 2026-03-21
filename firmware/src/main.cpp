@@ -1,13 +1,11 @@
-#include "Audio.h"
 #include "Config.h"
-#include "SD_MMC.h"
-#include "driver/i2s_common.h"
-#include "driver/i2s_std.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <BlynkSimpleEsp32.h>
 #include <HTTPClient.h>
+#include <WebServer.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 // Note off my tssk in 21/3/2026
 /**
  i will update user interface to connect with code 3 api
@@ -23,17 +21,8 @@
  ok let sleep now :)))
  */
 
-// --- Audio Paths ---
-const char *AUDIO_FILE_1 = "/level1.mp3"; // File âm thanh cho Level 1 (Thẻ SD)
-const char *AUDIO_FILE_2 = "/level2.mp3"; // File âm thanh cho Level 2 (Thẻ SD)
-
-// Bảng chân I2S cho Audio (Tham chiếu)
-#define I2S_EN_PIN 1
-#define I2S_MCLK_PIN 4
-#define I2S_BCLK_PIN 5
-#define I2S_DOUT_PIN 6
-#define I2S_LRCK_PIN 7
-#define I2S_DIN_PIN 8
+// --- WebServer ---
+WebServer server(80);
 
 // Chân nút bấm trên ESP (Ví dụ nút BOOT)
 #define HW_BUTTON_PIN 0
@@ -66,22 +55,19 @@ int blynk_v0_state = 0; // Lưu trạng thái nút V0 (I'm OK) trên blynk
 unsigned long lastV6Write =
     0; // Timer cho việc giữ đèn V6 trong WAIT_FOR_BUTTON
 
-// Khởi tạo đối tượng Audio và I2S
-Audio audio;
-i2s_chan_handle_t rx_chan; // Handle cho I2S RX (ghi âm)
+// Đối tượng WebServer đã khởi tạo ở trên
 
 // Danh sách số điện thoại nhận SOS (Cài đặt cố định)
 String SDT[] = {"0123456789", "0987654321"};
 
-// Khai báo hàm
 void checkApiStatus();
 void sendSafeStatusToServer();
-void playAudio(int caseType);
-bool checkVoiceCommand();
+void triggerXiaozhi();
 void resetSystem();
 void sendSOS();
 void handleStateLogic();
 void triggerSOS(); // Wrapper: sendSOS() + chuyển sang WAIT_FOR_BUTTON
+void setupWebServer();
 
 // BƯỚC 1: Hàm checkApiStatus để nhận các thông tin từ server
 void checkApiStatus() {
@@ -100,8 +86,11 @@ void checkApiStatus() {
 
       if (typeStr == "apiSendSafe") {
         float remaining_seconds = doc["safe_remaining_seconds"].as<float>();
-        Serial.printf("[HỆ THỐNG] Đang trong trạng thái AN TOÀN. Thời gian duy trì còn lại: %.1f giây\n", remaining_seconds);
-      } else if (typeStr == "apiSendFall" && fallDetected && currentState == IDLE) {
+        Serial.printf("[HỆ THỐNG] Đang trong trạng thái AN TOÀN. Thời gian duy "
+                      "trì còn lại: %.1f giây\n",
+                      remaining_seconds);
+      } else if (typeStr == "apiSendFall" && fallDetected &&
+                 currentState == IDLE) {
         fallTimeStr = doc["fall_time"].as<String>();
 
         // Lấy domain gốc (cắt bỏ phần đuôi đằng sau mốc Port :8000)
@@ -157,81 +146,43 @@ void sendSafeStatusToServer() {
   }
 }
 
-// BƯỚC 3: Hàm phát âm thanh dựa trên tệp trong thẻ SD
-void playAudio(int caseType) {
-  // Nếu đang phát rồi thì không làm gì cả để tránh bị vấp (stutter)
-  if (audio.isRunning())
-    return;
-
-  // Tắt I2S RX (mic) để tránh xung đột bus (speaker và mic dùng chung
-  // BCLK/LRCK)
-  i2s_channel_disable(rx_chan);
-
-  // BẬT Audio Enable (Mức logic LOW = enable)
-  digitalWrite(I2S_EN_PIN, LOW);
-
-  if (caseType == 1) {
-    Serial.println("[AUDIO] Đang phát âm thanh Level 1 từ thẻ SD...");
-    audio.connecttoFS(SD_MMC, AUDIO_FILE_1);
-  } else if (caseType == 2) {
-    Serial.println("[AUDIO] Đang phát còi hú SOS từ thẻ SD...");
-    audio.connecttoFS(SD_MMC, AUDIO_FILE_2);
+// BƯỚC 3: Hàm kích hoạt Xiaozhi AI phát loa và nghe
+void triggerXiaozhi() {
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("[LEVEL 1] Đang gọi điện cho Xiaozhi AI (đánh thức)...");
+    HTTPClient http;
+    http.begin(XIAOZHI_ALERT_URL);
+    int httpCode = http.GET();
+    if (httpCode > 0) {
+      Serial.println("[LEVEL 1] Đã gửi lệnh cảnh báo cho Xiaozhi thành công.");
+    } else {
+      Serial.printf("[LEVEL 1] Lỗi gọi Xiaozhi: %s\n",
+                    http.errorToString(httpCode).c_str());
+    }
+    http.end();
   }
 }
 
-// BƯỚC 4: Hàm ghi âm thanh bằng mic của esp và kiểm tra cường độ
-bool checkVoiceCommand() {
-  // Bật I2S RX (mic) — đảm bảo mic sẵn sàng trước khi đọc
-  i2s_channel_enable(rx_chan);
-
-  size_t bytes_read = 0;
-  int16_t i2s_raw_buffer[512];
-
-  // Đọc dữ liệu từ I2S RX
-  if (i2s_channel_read(rx_chan, i2s_raw_buffer, sizeof(i2s_raw_buffer),
-                       &bytes_read, 100) == ESP_OK) {
-    long sum = 0;
-    for (int i = 0; i < bytes_read / 2; i++) {
-      sum += abs(i2s_raw_buffer[i]);
-    }
-    float average_amplitude = sum / (bytes_read / 2.0);
-
-    // Nếu cường độ âm thanh vượt ngưỡng → coi như xác nhận "tôi ổn"
-    if (average_amplitude > 1500) {
-      Serial.printf("[MIC] Phát hiện âm thanh cường độ cao: %.2f\n",
-                    average_amplitude);
-      return true;
-    }
-  }
-  return false;
+// BƯỚC 4: Các WebServer Handlers để nhận kết quả từ Xiaozhi
+void handleSafeFromXiaozhi() {
+  Serial.println("[LEVEL 1] Nhận lệnh AN TOÀN từ Xiaozhi!");
+  server.send(200, "text/plain", "OK-Safe");
+  sendSafeStatusToServer(); // Gửi trạng thái an toàn lên API
+  resetSystem();            // Đưa hệ thống về IDLE
 }
 
-// Hàm khởi tạo I2S cho Ghi âm (RX) - Sử dụng I2S_NUM_1 để tránh xung đột với
-// Audio library (I2S_NUM_0)
-void initI2SRecording() {
-  // ESP32-S3 có 2 bộ I2S. Audio library dùng I2S_NUM_0, ta dùng I2S_NUM_1 cho
-  // Mic.
-  i2s_chan_config_t chan_cfg =
-      I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
-  i2s_new_channel(&chan_cfg, NULL, &rx_chan);
+void handleSOSFromXiaozhi() {
+  Serial.println("[LEVEL 1] Nhận lệnh KÊU CỨU KHẨN CẤP từ Xiaozhi!");
+  server.send(200, "text/plain", "OK-SOS");
+  triggerSOS(); // Gọi SOS hỏa tốc, chuyển trạng thái và gửi Telegram
+}
 
-  i2s_std_config_t std_cfg = {
-      .clk_cfg =
-          I2S_STD_CLK_DEFAULT_CONFIG(16000), // Sample rate 16kHz cho ghi âm
-      .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
-                                                  I2S_SLOT_MODE_MONO),
-      .gpio_cfg = {.mclk = I2S_GPIO_UNUSED, // Mic thường không cần MCLK
-                   .bclk = (gpio_num_t)I2S_BCLK_PIN,
-                   .ws = (gpio_num_t)I2S_LRCK_PIN,
-                   .dout = I2S_GPIO_UNUSED,
-                   .din = (gpio_num_t)I2S_DIN_PIN,
-                   .invert_flags = {.mclk_inv = false,
-                                    .bclk_inv = false,
-                                    .ws_inv = false}},
-  };
-  i2s_channel_init_std_mode(rx_chan, &std_cfg);
-  i2s_channel_enable(rx_chan);
-  Serial.println("[HỆ THỐNG] Đã khởi tạo I2S Recording (NUM_1) thành công.");
+void setupWebServer() {
+  server.on("/safe", HTTP_GET, handleSafeFromXiaozhi);
+  server.on("/sos", HTTP_GET, handleSOSFromXiaozhi);
+  server.begin();
+  Serial.println(
+      "[HỆ THỐNG] WebServer nội bộ đã khởi chạy ở cổng 80 cho Xiaozhi.");
 }
 
 // BƯỚC 5: Hàm reset về trạng thái ban đầu cho hệ thống
@@ -262,20 +213,56 @@ void resetSystem() {
   Blynk.virtualWrite(V12, 0);        // Tắt nút SOS
 }
 
-// BƯỚC 9: Xây dựng hàm SOS() — Chỉ gửi thông tin, KHÔNG block vòng lặp
+// BƯỚC 9: Xây dựng hàm SOS() — Gửi qua Telegram
 void sendSOS() {
   Serial.println("==================================");
-  Serial.println("THỰC HIỆN GỬI SOS ĐẾN CƠ QUAN Y TẾ VÀ NGƯỜI NHÀ");
+  Serial.println(
+      "THỰC HIỆN GỬI SOS ĐẾN CƠ QUAN Y TẾ VÀ NGƯỜI NHÀ QUA TELEGRAM");
 
-  String msg = "Thông cáo: Bạn có người nhà đang nguy hiểm!!!\n";
-  msg += "Thời gian: " + fallTimeStr + "\n";
-  msg += "Bằng chứng: " + evidenceUrl + "\n";
-  msg += "SĐT người thân: " + SDT[0] + "\n";
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    WiFiClientSecure client;
+    client.setInsecure(); // Bỏ qua SSL Certificate do Telegram dùng HTTPS
 
-  Serial.println(msg);
+    String url = "https://api.telegram.org/bot" + String(TELEGRAM_BOT_TOKEN) +
+                 "/sendMessage";
+    http.begin(client, url);
+    http.addHeader("Content-Type", "application/json");
 
-  for (int i = 0; i < sizeof(SDT) / sizeof(SDT[0]); i++) {
-    Serial.println("-> Đang gửi thông báo đến SĐT: " + SDT[i]);
+    String textMsg = "🚨 *CẢNH BÁO PHÁT HIỆN NGÃ!* 🚨\n"
+                     "⏰ *Thời gian:* " +
+                     fallTimeStr +
+                     "\n"
+                     "📍 *Địa chỉ:* " +
+                     String(DIA_CHI_NHA) +
+                     "\n"
+                     "📞 *SDT Người thân:* " +
+                     SDT[0] + " / " + SDT[1] +
+                     "\n"
+                     "📸 *Bằng chứng:* " +
+                     evidenceUrl;
+
+    Serial.println(textMsg);
+
+    JsonDocument doc;
+    doc["chat_id"] = TELEGRAM_CHAT_ID;
+    doc["text"] = textMsg;
+    doc["parse_mode"] = "Markdown";
+
+    String payload;
+    serializeJson(doc, payload);
+
+    int httpResponseCode = http.POST(payload);
+    if (httpResponseCode > 0) {
+      Serial.printf("[TELEGRAM] Đã gửi SOS thành công, HTTP Code: %d\n",
+                    httpResponseCode);
+    } else {
+      Serial.printf("[TELEGRAM] Lỗi gửi SOS, Error: %s\n",
+                    http.errorToString(httpResponseCode).c_str());
+    }
+    http.end();
+  } else {
+    Serial.println("[LỖI] Không có kết nối WiFi để gửi Telegram SOS!");
   }
   Serial.println("==================================");
   // Sau khi gửi SOS, nơi gọi hàm phải set currentState = WAIT_FOR_BUTTON
@@ -307,42 +294,24 @@ void handleStateLogic() {
       level1Phase = L1_PLAYING; // Bắt đầu bằng phát audio
     }
 
-    // Trong vòng 2 phút (120,000 ms): chu kỳ phát audio → lắng nghe
+    // Trong vòng 2 phút (120,000 ms), chờ phản hồi từ Xiaozhi
     if (millis() - level1StartTime < 120000) {
 
       if (level1Phase == L1_PLAYING) {
-        // === PHASE 1: Phát audio cảnh báo ===
-        playAudio(1);
-        // Khi audio phát xong → chuyển sang lắng nghe
-        if (!audio.isRunning() && level1Notified) {
-          level1Phase = L1_LISTENING;
-          listeningStartTime = millis();
-          Serial.println("[LEVEL 1] Audio xong, bắt đầu lắng nghe...");
-        }
-      } else if (level1Phase == L1_LISTENING) {
-        // === PHASE 2: Lắng nghe mic (3 giây) ===
-        bool saySafe = checkVoiceCommand();
-        if (saySafe) {
-          Serial.println("[LEVEL 1] Xác nhận an toàn từ giọng nói!");
-          i2s_channel_disable(rx_chan); // Tắt mic
-          sendSafeStatusToServer();     // Gửi trạng thái an toàn lên API
-          resetSystem();
-          break;
-        }
-        // Hết cửa sổ lắng nghe 3s → phát lại audio
-        if (millis() - listeningStartTime >= LISTENING_WINDOW) {
-          Serial.println(
-              "[LEVEL 1] Không phát hiện phản hồi, phát lại audio...");
-          level1Phase = L1_PLAYING;
-        }
+        // === GỌI XIAOZHI ===
+        triggerXiaozhi();
+        level1Phase =
+            L1_LISTENING; // Chờ Xiaozhi trả kết quả ngầm qua WebServer
       }
+
+      // Quá trình lắng nghe kết quả an toàn / báo khẩn cấp xử lý bằng ngầm
+      // WebServer (loop)
 
       // Xử lý nút V0 (I'm OK) và V4 (Gọi Cấp Cứu) do BLYNK_WRITE() đảm nhiệm
     } else {
-      // Hết 2 phút không phản hồi → Chuyển qua LEVEL 2
+      // Hết 2 phút không có tín hiệu HTTP gọi về → Chuyển qua LEVEL 2
       Serial.println("[LEVEL 1] Hết 2 phút, nạn nhân không phản hồi. Chuyển "
                      "sang LEVEL 2.");
-      i2s_channel_disable(rx_chan); // Tắt mic khi rời LEVEL_1
       currentState = LEVEL_2;
       level2StartTime = millis();
       level2Notified = false;
@@ -457,10 +426,7 @@ void setup() {
   // Cấu hình nút bấm trên ESP (Thường PullUp nội bên trong)
   pinMode(HW_BUTTON_PIN, INPUT_PULLUP);
 
-  // Cấu hình chân Audio Enable (Mức logic theo bảng: High level disable, Low
-  // level enable) // BƯỚC 3
-  pinMode(I2S_EN_PIN, OUTPUT);
-  digitalWrite(I2S_EN_PIN, HIGH);
+  // Removed Audio Enable config
 
   // Kết nối WiFi (Non-blocking hoặc Timeout ngắn)
   Serial.println("Đang cấu hình WiFi...");
@@ -476,19 +442,8 @@ void setup() {
     Serial.print("\nWiFi connected! IP address: ");
     Serial.println(WiFi.localIP());
 
-    // --- Khởi tạo Audio & SD Card & I2S Recording ---
-    audio.setPinout(I2S_BCLK_PIN, I2S_LRCK_PIN, I2S_DOUT_PIN);
-    audio.setVolume(21); // Âm lượng tối đa
-
-    // Cấu hình chân SDIO cho ESP32-S3
-    SD_MMC.setPins(38, 40, 39, 41, 48, 47);
-    if (!SD_MMC.begin("/sdcard", false)) { // false = 4-bit mode
-      Serial.println("[LỖI] Không thể mount thẻ nhớ SD!");
-    } else {
-      Serial.println("[HỆ THỐNG] Đã mount thẻ nhớ SD thành công.");
-    }
-
-    initI2SRecording();
+    // --- Khởi chạy WebServer thay cho Audio/I2S ---
+    setupWebServer();
 
     // Cấu hình Blynk (KHÔNG BLOCK HỆ THỐNG nếu WiFi rớt)
     Blynk.config(BLYNK_AUTH_TOKEN);
@@ -516,15 +471,6 @@ void loop() {
 
   handleStateLogic();
 
-  // Cập nhật Audio và Loa
-  audio.loop();
-
-  // Tắt Audio EN khi không phát nữa
-  static bool lastRunning = false;
-  bool isRunning = audio.isRunning();
-  if (lastRunning && !isRunning) {
-    digitalWrite(I2S_EN_PIN, HIGH);
-    Serial.println("[AUDIO] Đã phát xong, tắt Audio EN.");
-  }
-  lastRunning = isRunning;
+  // Xử lý các request từ Xiaozhi AI
+  server.handleClient();
 }

@@ -12,7 +12,6 @@
 #include <HTTPClient.h>
 #include <WiFi.h>
 
-
 // --- WiFi Credentials ---
 const char *ssid = "Xiaomi";
 const char *pass = "12345679@";
@@ -116,8 +115,15 @@ void checkApiStatus() {
 
       String typeStr = doc["type"].as<String>();
       bool fallDetected = doc["fall_detected"];
-
-      if (typeStr == "apiSendFall" && fallDetected && currentState == IDLE) {
+      // check typeStr ádfasfasdfdsafseadfasdefasdfsadfasdfsadfasdfdsaf
+      if (typeStr == "apiSendSafe") {
+        float remaining_seconds = doc["safe_remaining_seconds"].as<float>();
+        Blynk.virtualWrite(V5, remaining_seconds);
+        Serial.printf("[HỆ THỐNG] Đang trong trạng thái AN TOÀN. Thời gian duy "
+                      "trì còn lại: %.1f giây\n",
+                      remaining_seconds);
+      } else if (typeStr == "apiSendFall" && fallDetected &&
+                 currentState == IDLE) {
         fallTimeStr = doc["fall_time"].as<String>();
 
         // Lấy domain gốc (cắt bỏ phần đuôi đằng sau mốc Port :8000)
@@ -133,7 +139,9 @@ void checkApiStatus() {
         level1StartTime = millis();
         level1Notified = false; // Reset cờ thông báo lúc rơi ngã
 
-        Serial.println("[CẢNH BÁO] Phát hiện ngã từ API Server!");
+        Serial.println("[CẢNH BÁO] Phát hiện có người bị ngã trong nhà ");
+        Serial.println("Thời gian: ");
+        Serial.println(fallTimeStr);
       }
     } else {
       Serial.printf("[API] GET failed, error: %s (Code: %d)\n",
@@ -252,7 +260,8 @@ void initI2SRecording() {
 
 // BƯỚC 5: Hàm reset về trạng thái ban đầu cho hệ thống
 void resetSystem() {
-  Serial.println("[HỆ THỐNG] Resetting system to IDLE...");
+  Serial.println(
+      "[HỆ THỐNG] Hệ thống sẽ quay trở lại  trạng thái tiếp tục giám sát ");
   currentState = IDLE;
   level1Notified = false;
   level2Notified = false;
@@ -272,6 +281,7 @@ void resetSystem() {
   Blynk.virtualWrite(V0, 0);         // Tắt nút I'm OK
   Blynk.virtualWrite(V1, "");        // Xóa Terminal cảnh báo
   Blynk.setProperty(V3, "urls", ""); // Xóa ảnh bằng chứng
+  Blynk.virtualWrite(V5, 0);         // Thiết lập lại thời gian an toàn
   Blynk.virtualWrite(V6, 0);         // Tắt đèn SOS khẩn cấp
   Blynk.virtualWrite(V4, 0);         // Tắt nút Gọi Cấp Cứu (Level 1)
   Blynk.virtualWrite(V11, 0);        // Tắt nút An Toàn
@@ -511,12 +521,13 @@ void setup() {
     Blynk.config(BLYNK_AUTH_TOKEN);
     Blynk
         .connect(); // Sẽ cố gắng connect, nếu không được vẫn thoát ra chay tiep
+    Serial.println("Hệ thống khởi động hoàn tất!");
+
   } else {
     Serial.println(
         "\n[LỖI] Không thể kết nối WiFi, vào mode offline theo dõi.");
+    Serial.println("Hệ thống khởi động thất bại!");
   }
-
-  Serial.println("Hệ thống khởi động hoàn tất!");
 }
 
 void loop() {

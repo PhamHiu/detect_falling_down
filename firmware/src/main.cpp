@@ -98,7 +98,10 @@ void checkApiStatus() {
       String typeStr = doc["type"].as<String>();
       bool fallDetected = doc["fall_detected"];
 
-      if (typeStr == "apiSendFall" && fallDetected && currentState == IDLE) {
+      if (typeStr == "apiSendSafe") {
+        float remaining_seconds = doc["safe_remaining_seconds"].as<float>();
+        Serial.printf("[HỆ THỐNG] Đang trong trạng thái AN TOÀN. Thời gian duy trì còn lại: %.1f giây\n", remaining_seconds);
+      } else if (typeStr == "apiSendFall" && fallDetected && currentState == IDLE) {
         fallTimeStr = doc["fall_time"].as<String>();
 
         // Lấy domain gốc (cắt bỏ phần đuôi đằng sau mốc Port :8000)
@@ -353,13 +356,12 @@ void handleStateLogic() {
     if (!level2Notified) {
       String msg = "Cảnh báo: Có người bị ngã hãy check cam ngay\n";
       msg += "Giờ ngã: " + fallTimeStr;
-      Blynk.virtualWrite(V1, msg);                // Gửi vào Terminal V1
-      Blynk.setProperty(V3, "urls", evidenceUrl); // Tải URL ảnh bằng chứng
+      Blynk.virtualWrite(V1, msg); // Gửi vào Terminal V1
+      Blynk.setProperty(V3, "urls", evidenceUrl);
+      Serial.println(evidenceUrl);
       Blynk.virtualWrite(V11, 1); // Bật nút "An Toàn" (xanh) cho người nhà
       Blynk.virtualWrite(V12, 1); // Bật nút "SOS" (đỏ) cho người nhà
       level2Notified = true;
-      Serial.println("[LEVEL 2] Đã đẩy cảnh báo lên Blynk (V1, V2, V3, V11, "
-                     "V12). Đang đếm 3 phút...");
     }
 
     // Quá 3 phút (180,000 ms) mà người nhà không bấm → Tự động gửi SOS

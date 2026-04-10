@@ -1,11 +1,10 @@
 #include "Audio.h"
 #include "Config.h"
 #include "SD_MMC.h"
-#include "driver/i2s_common.h"
-#include "driver/i2s_std.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <BlynkSimpleEsp32.h>
+#include <ESPmDNS.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
 // Note off my tssk in 21/3/2026
@@ -33,7 +32,6 @@ const char *AUDIO_FILE_2 = "/level2.mp3"; // File âm thanh cho Level 2 (Thẻ S
 #define I2S_BCLK_PIN 5
 #define I2S_DOUT_PIN 6
 #define I2S_LRCK_PIN 7
-#define I2S_DIN_PIN 8
 
 // Chân nút bấm trên ESP (Ví dụ nút BOOT)
 #define HW_BUTTON_PIN 0
@@ -55,20 +53,12 @@ bool level1Notified = false;
 unsigned long level2StartTime = 0;
 bool level2Notified = false;
 
-// Sub-state cho LEVEL_1: phát audio → lắng nghe tuần tự
-enum Level1Phase { L1_PLAYING, L1_LISTENING };
-Level1Phase level1Phase = L1_PLAYING;
-unsigned long listeningStartTime = 0;
-const unsigned long LISTENING_WINDOW =
-    3000; // Lắng nghe 3 giây sau mỗi lần phát
-
 int blynk_v0_state = 0; // Lưu trạng thái nút V0 (I'm OK) trên blynk
 unsigned long lastV6Write =
     0; // Timer cho việc giữ đèn V6 trong WAIT_FOR_BUTTON
 
 // Khởi tạo đối tượng Audio và I2S
 Audio audio;
-i2s_chan_handle_t rx_chan; // Handle cho I2S RX (ghi âm)
 
 // Danh sách số điện thoại nhận SOS (Cài đặt cố định)
 String SDT[] = {"0123456789", "0987654321"};
@@ -77,7 +67,6 @@ String SDT[] = {"0123456789", "0987654321"};
 void checkApiStatus();
 void sendSafeStatusToServer();
 void playAudio(int caseType);
-bool checkVoiceCommand();
 void resetSystem();
 void sendSOS();
 void handleStateLogic();
@@ -100,8 +89,11 @@ void checkApiStatus() {
 
       if (typeStr == "apiSendSafe") {
         float remaining_seconds = doc["safe_remaining_seconds"].as<float>();
-        Serial.printf("[HỆ THỐNG] Đang trong trạng thái AN TOÀN. Thời gian duy trì còn lại: %.1f giây\n", remaining_seconds);
-      } else if (typeStr == "apiSendFall" && fallDetected && currentState == IDLE) {
+        Serial.printf("[HỆ THỐNG] Đang trong trạng thái AN TOÀN. Thời gian duy "
+                      "trì còn lại: %.1f giây\n",
+                      remaining_seconds);
+      } else if (typeStr == "apiSendFall" && fallDetected &&
+                 currentState == IDLE) {
         fallTimeStr = doc["fall_time"].as<String>();
 
         // Lấy domain gốc (cắt bỏ phần đuôi đằng sau mốc Port :8000)
@@ -163,86 +155,35 @@ void playAudio(int caseType) {
   if (audio.isRunning())
     return;
 
-  // Tắt I2S RX (mic) để tránh xung đột bus (speaker và mic dùng chung
-  // BCLK/LRCK)
-  i2s_channel_disable(rx_chan);
-
   // BẬT Audio Enable (Mức logic LOW = enable)
   digitalWrite(I2S_EN_PIN, LOW);
 
   if (caseType == 1) {
-    Serial.println("[AUDIO] Đang phát âm thanh Level 1 từ thẻ SD...");
     audio.connecttoFS(SD_MMC, AUDIO_FILE_1);
   } else if (caseType == 2) {
-    Serial.println("[AUDIO] Đang phát còi hú SOS từ thẻ SD...");
     audio.connecttoFS(SD_MMC, AUDIO_FILE_2);
   }
-}
-
-// BƯỚC 4: Hàm ghi âm thanh bằng mic của esp và kiểm tra cường độ
-bool checkVoiceCommand() {
-  // Bật I2S RX (mic) — đảm bảo mic sẵn sàng trước khi đọc
-  i2s_channel_enable(rx_chan);
-
-  size_t bytes_read = 0;
-  int16_t i2s_raw_buffer[512];
-
-  // Đọc dữ liệu từ I2S RX
-  if (i2s_channel_read(rx_chan, i2s_raw_buffer, sizeof(i2s_raw_buffer),
-                       &bytes_read, 100) == ESP_OK) {
-    long sum = 0;
-    for (int i = 0; i < bytes_read / 2; i++) {
-      sum += abs(i2s_raw_buffer[i]);
-    }
-    float average_amplitude = sum / (bytes_read / 2.0);
-
-    // Nếu cường độ âm thanh vượt ngưỡng → coi như xác nhận "tôi ổn"
-    if (average_amplitude > 1500) {
-      Serial.printf("[MIC] Phát hiện âm thanh cường độ cao: %.2f\n",
-                    average_amplitude);
-      return true;
-    }
-  }
-  return false;
-}
-
-// Hàm khởi tạo I2S cho Ghi âm (RX) - Sử dụng I2S_NUM_1 để tránh xung đột với
-// Audio library (I2S_NUM_0)
-void initI2SRecording() {
-  // ESP32-S3 có 2 bộ I2S. Audio library dùng I2S_NUM_0, ta dùng I2S_NUM_1 cho
-  // Mic.
-  i2s_chan_config_t chan_cfg =
-      I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
-  i2s_new_channel(&chan_cfg, NULL, &rx_chan);
-
-  i2s_std_config_t std_cfg = {
-      .clk_cfg =
-          I2S_STD_CLK_DEFAULT_CONFIG(16000), // Sample rate 16kHz cho ghi âm
-      .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
-                                                  I2S_SLOT_MODE_MONO),
-      .gpio_cfg = {.mclk = I2S_GPIO_UNUSED, // Mic thường không cần MCLK
-                   .bclk = (gpio_num_t)I2S_BCLK_PIN,
-                   .ws = (gpio_num_t)I2S_LRCK_PIN,
-                   .dout = I2S_GPIO_UNUSED,
-                   .din = (gpio_num_t)I2S_DIN_PIN,
-                   .invert_flags = {.mclk_inv = false,
-                                    .bclk_inv = false,
-                                    .ws_inv = false}},
-  };
-  i2s_channel_init_std_mode(rx_chan, &std_cfg);
-  i2s_channel_enable(rx_chan);
-  Serial.println("[HỆ THỐNG] Đã khởi tạo I2S Recording (NUM_1) thành công.");
 }
 
 // BƯỚC 5: Hàm reset về trạng thái ban đầu cho hệ thống
 void resetSystem() {
   Serial.println("[HỆ THỐNG] Resetting system to IDLE...");
+
+  // Dừng phát âm thanh ngay lập tức nếu đang phát
+  if (audio.isRunning()) {
+    audio.stopSong();
+  }
+  digitalWrite(I2S_EN_PIN, HIGH); // Tắt loa
+
   currentState = IDLE;
   level1Notified = false;
   level2Notified = false;
   blynk_v0_state = 0;
-  lastV6Write = 0;
-  fallTimeStr = "";
+
+  Blynk.virtualWrite(V1,
+                     "\nHệ thống an toàn.\n"); // Xóa thông báo cũ trên màn hình
+
+  // Tắt giao diện Blynk (đưa nút về trạng thái tắt)
   evidenceUrl = "";
 
   if (WiFi.status() == WL_CONNECTED) {
@@ -287,6 +228,7 @@ void triggerSOS() {
   sendSOS();
   currentState = WAIT_FOR_BUTTON;
   lastV6Write = 0; // Reset timer để V6 bật ngay lập tức
+  Blynk.virtualWrite(V1, "ĐÃ KÍCH HOẠT CHƯƠNG TRÌNH SOS!");
 }
 
 // BƯỚC 6, 7, 8: Hàm xử lý loop logic cho hệ thống
@@ -294,55 +236,28 @@ void handleStateLogic() {
   switch (currentState) {
 
   // ── GIAI ĐOẠN 1: PHÁT HIỆN NGÃ, NẠN NHÂN CÒN NHẬN THỨC ──
-  // Logic tuần tự: Phát audio → Lắng nghe 3s → Lặp lại (trong 2 phút)
+  // Phát âm thanh báo động tuần tự lặp đi lặp lại
   case LEVEL_1: {
     // Thông báo 1 lần duy nhất khi mới vào Level 1
     if (!level1Notified) {
-      Serial.println(
-          "[LEVEL 1] Phát hiện ngã! Đang chờ phản hồi từ nạn nhân...");
+      Serial.println("[LEVEL 1] Phát hiện ngã! Đang phát âm thanh cảnh báo...");
+      Blynk.virtualWrite(V1, "Bạn có ổn không?"); // Hiển thị trên màn hình V1
       Blynk.virtualWrite(V0,
                          1); // Bật nút I'm OK (đỏ) — nạn nhân gạt về 0 nếu ổn
       Blynk.virtualWrite(V4, 1); // Bật nút Gọi Cấp Cứu (Level 1)
       level1Notified = true;
-      level1Phase = L1_PLAYING; // Bắt đầu bằng phát audio
     }
 
-    // Trong vòng 2 phút (120,000 ms): chu kỳ phát audio → lắng nghe
-    if (millis() - level1StartTime < 120000) {
+    // Liên tục phát âm thanh cảnh báo ngã ở mức Level 1
+    if (!audio.isRunning()) {
+      playAudio(1);
+    }
 
-      if (level1Phase == L1_PLAYING) {
-        // === PHASE 1: Phát audio cảnh báo ===
-        playAudio(1);
-        // Khi audio phát xong → chuyển sang lắng nghe
-        if (!audio.isRunning() && level1Notified) {
-          level1Phase = L1_LISTENING;
-          listeningStartTime = millis();
-          Serial.println("[LEVEL 1] Audio xong, bắt đầu lắng nghe...");
-        }
-      } else if (level1Phase == L1_LISTENING) {
-        // === PHASE 2: Lắng nghe mic (3 giây) ===
-        bool saySafe = checkVoiceCommand();
-        if (saySafe) {
-          Serial.println("[LEVEL 1] Xác nhận an toàn từ giọng nói!");
-          i2s_channel_disable(rx_chan); // Tắt mic
-          sendSafeStatusToServer();     // Gửi trạng thái an toàn lên API
-          resetSystem();
-          break;
-        }
-        // Hết cửa sổ lắng nghe 3s → phát lại audio
-        if (millis() - listeningStartTime >= LISTENING_WINDOW) {
-          Serial.println(
-              "[LEVEL 1] Không phát hiện phản hồi, phát lại audio...");
-          level1Phase = L1_PLAYING;
-        }
-      }
-
-      // Xử lý nút V0 (I'm OK) và V4 (Gọi Cấp Cứu) do BLYNK_WRITE() đảm nhiệm
-    } else {
-      // Hết 2 phút không phản hồi → Chuyển qua LEVEL 2
-      Serial.println("[LEVEL 1] Hết 2 phút, nạn nhân không phản hồi. Chuyển "
+    // Sau 2 phút (LEVEL_1_TIMEOUT ms)
+    if (millis() - level1StartTime >= LEVEL_1_TIMEOUT) {
+      // Hết 2 phút không ai bấm nút → Chuyển qua LEVEL 2
+      Serial.println("[LEVEL 1] Hết 2 phút, không có phản hồi từ Blynk. Chuyển "
                      "sang LEVEL 2.");
-      i2s_channel_disable(rx_chan); // Tắt mic khi rời LEVEL_1
       currentState = LEVEL_2;
       level2StartTime = millis();
       level2Notified = false;
@@ -361,13 +276,18 @@ void handleStateLogic() {
       Serial.println(evidenceUrl);
       Blynk.virtualWrite(V11, 1); // Bật nút "An Toàn" (xanh) cho người nhà
       Blynk.virtualWrite(V12, 1); // Bật nút "SOS" (đỏ) cho người nhà
+
       level2Notified = true;
     }
 
-    // Quá 3 phút (180,000 ms) mà người nhà không bấm → Tự động gửi SOS
-    if (millis() - level2StartTime >= 180000) {
-      Serial.println(
-          "[LEVEL 2] Quá 3 phút không phản hồi. Tự động kích hoạt SOS!");
+    // Tiếp tục dồn ép và cảnh báo liên tục (Còi hú nguy cấp)
+    if (!audio.isRunning()) {
+      playAudio(2); // File Level2
+    }
+
+    // Quá thời gian Level 2 mà người nhà không bấm → Tự động gửi SOS
+    if (millis() - level2StartTime >= LEVEL_2_TIMEOUT) {
+      Serial.println("[LEVEL 2] Đã quá thời hạn chờ. Tự động kích hoạt SOS!");
       triggerSOS();
     }
     // Xử lý nút V11 (An Toàn) và V12 (SOS) do BLYNK_WRITE() đảm nhiệm
@@ -414,13 +334,14 @@ BLYNK_WRITE(V4) {
   }
 }
 
-// [V11] Nút "An Toàn" (Push) — Người nhà xác nhận nạn nhân ổn tại LEVEL_2
+// [V11] Nút "An Toàn" (Push) — Người nhà xác nhận nạn nhân ổn
 BLYNK_WRITE(V11) {
-  if (param.asInt() == 1 && currentState == LEVEL_2) {
-    Serial.println("[LEVEL 2] Người nhà xác nhận AN TOÀN qua V11!");
-    Blynk.virtualWrite(V12, 0); // Tắt nút SOS còn lại
+  if (param.asInt() == 1 &&
+      (currentState == LEVEL_1 || currentState == LEVEL_2)) {
+    Serial.println("[HỆ THỐNG] Người nhà xác nhận AN TOÀN qua V11!");
+    Blynk.virtualWrite(V12, 0); // Tắt nút SOS còn lại nếu có
     sendSafeStatusToServer();   // Gửi trạng thái an toàn lên API
-    resetSystem();              // Đưa hệ thống về IDLE
+    resetSystem();              // Đưa hệ thống về IDLE (tự động tắt loa)
   }
 }
 
@@ -476,6 +397,35 @@ void setup() {
     Serial.print("\nWiFi connected! IP address: ");
     Serial.println(WiFi.localIP());
 
+    // --- mDNS: Tự động tìm IP máy tính qua tên "falldect.local" ---
+    String resolvedBaseUrl = "";
+    if (MDNS.begin("esp32-falldect")) {
+      Serial.println("[mDNS] Đang query falldect.local...");
+      IPAddress serverIP =
+          MDNS.queryHost(SERVER_MDNS_HOST, 3000); // Chờ tối đa 3s
+      if (serverIP != INADDR_NONE && serverIP[0] != 0) {
+        resolvedBaseUrl =
+            "http://" + serverIP.toString() + ":" + String(SERVER_PORT);
+        Serial.println("[mDNS] ✅ Tìm thấy server tại: " + resolvedBaseUrl);
+      } else {
+        Serial.println(
+            "[mDNS] ⚠️ Không tìm thấy falldect.local, dùng IP fallback.");
+        resolvedBaseUrl =
+            "http://" + String(FALLBACK_IP) + ":" + String(SERVER_PORT);
+      }
+    } else {
+      Serial.println("[mDNS] ❌ Lỗi khởi tạo mDNS, dùng IP fallback.");
+      resolvedBaseUrl =
+          "http://" + String(FALLBACK_IP) + ":" + String(SERVER_PORT);
+    }
+    server_url_str = resolvedBaseUrl + "/gate";
+    reset_url_str = resolvedBaseUrl + "/reset";
+    server_url = server_url_str.c_str();
+    reset_url = reset_url_str.c_str();
+    Serial.println("[CONFIG] server_url = " + server_url_str);
+    Serial.println("[CONFIG] reset_url  = " + reset_url_str);
+    // ─────────────────────────────────────────────────────────────
+
     // --- Khởi tạo Audio & SD Card & I2S Recording ---
     audio.setPinout(I2S_BCLK_PIN, I2S_LRCK_PIN, I2S_DOUT_PIN);
     audio.setVolume(21); // Âm lượng tối đa
@@ -487,8 +437,6 @@ void setup() {
     } else {
       Serial.println("[HỆ THỐNG] Đã mount thẻ nhớ SD thành công.");
     }
-
-    initI2SRecording();
 
     // Cấu hình Blynk (KHÔNG BLOCK HỆ THỐNG nếu WiFi rớt)
     Blynk.config(BLYNK_AUTH_TOKEN);

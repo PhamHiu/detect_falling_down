@@ -5,6 +5,46 @@ from datetime import datetime
 import shutil
 import os
 import time
+import socket
+import threading
+import requests
+
+# ── mDNS: Đăng ký tên "falldect.local" lên mạng LAN ──────────────────────────
+def _get_local_ip() -> str:
+    """Lấy IP LAN thực của máy (không phải 127.0.0.1)"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+def _register_mdns():
+    try:
+        from zeroconf import Zeroconf, ServiceInfo
+        local_ip = _get_local_ip()
+        zeroconf = Zeroconf()
+        info = ServiceInfo(
+            "_http._tcp.local.",
+            "FallDetection._http._tcp.local.",
+            addresses=[socket.inet_aton(local_ip)],
+            port=8000,
+            properties={"path": "/gate"},
+            server="falldect.local.",
+        )
+        zeroconf.register_service(info)
+        print(f"[mDNS] ✅ Đã đăng ký falldect.local → {local_ip}:8000")
+        threading.Event().wait()   # Giữ thread chạy mãi
+    except ImportError:
+        print("[mDNS] ⚠️  Thư viện 'zeroconf' chưa được cài. Chạy: pip install zeroconf")
+    except Exception as e:
+        print(f"[mDNS] ❌ Lỗi đăng ký mDNS: {e}")
+
+# Khởi động mDNS trong background thread ngay khi module được import
+threading.Thread(target=_register_mdns, daemon=True, name="mdns-register").start()
+# ─────────────────────────────────────────────────────────────────────────────
 
 app = FastAPI()
 
@@ -17,6 +57,37 @@ if not os.path.exists(STORAGE_DIR):
 app.mount("/evidence", StaticFiles(directory=STORAGE_DIR), name="evidence")
 
 from typing import Optional
+
+# ── Cấu hình Telegram ────────────────────────────────────────────────────────
+TELEGRAM_BOT_TOKEN = "8471843401:AAFkEdigc4GtKRUi6Xu_A36SDoRq7y8AcUU"
+TELEGRAM_CHAT_ID = "5348036208"
+
+def send_telegram_alert(timestamp: str, image_path: str):
+    if TELEGRAM_BOT_TOKEN == "ĐIỀN_TOKEN_CỦA_BẠN_VÀO_ĐÂY" or not TELEGRAM_BOT_TOKEN:
+        print("[Telegram] ⚠️  Chưa cấu hình Token, bỏ qua gửi tin nhắn.")
+        return
+        
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    caption = (
+        f"🚨 <b>CẢNH BÁO PHÁT HIỆN NGÃ!</b> 🚨\n"
+        f"⏰ <b>Thời gian:</b> {timestamp}\n"
+        f"📍 <b>Địa chỉ:</b> Nhà số 123, Đường ABC, Quận XYZ, TP. Hà Nội\n"
+        f"📞 <b>SDT Người thân:</b> 0123456789 / 0987654321\n"
+        f"📸 <b>Trạng thái hiện tại:</b> Hình ảnh đính kèm bên trên"
+    )
+    
+    try:
+        with open(image_path, "rb") as img:
+            files = {"photo": img}
+            data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "HTML"}
+            response = requests.post(url, data=data, files=files, timeout=15)
+            if response.status_code == 200:
+                print("[Telegram] ✅ Đã gửi cảnh báo và hình ảnh thành công!")
+            else:
+                print(f"[Telegram] ❌ Lỗi từ Telegram: {response.text}")
+    except Exception as e:
+        print(f"[Telegram] ❌ Lỗi kết nối gửi tin nhắn: {e}")
+# ─────────────────────────────────────────────────────────────────────────────
 
 # Trạng thái hiện tại
 class FallStatus:
@@ -106,6 +177,19 @@ async def report_fall(
     
     return {"status": "success", "message": "Fall reported"}
 
+@app.post("/trigger-sos")
+async def trigger_sos():
+    """
+    Endpoint mới để thụ lý lệnh SOS tử bên ngoài (Ví dụ: từ ESP32 bóp còi SOS).
+    Khi gọi vào đây thì Telegram mới thực sự được bắn đi.
+    """
+    if current_status.evidence_url:
+        file_path = os.path.join(STORAGE_DIR, os.path.basename(current_status.evidence_url))
+        if os.path.exists(file_path):
+            threading.Thread(target=send_telegram_alert, args=(current_status.fall_time, file_path), daemon=True).start()
+            return {"status": "success", "message": "SOS sent to Telegram"}
+    return {"status": "error", "message": "No recent fall evidence"}
+
 @app.get("/gate")
 async def get_gate_data():
     """
@@ -158,4 +242,7 @@ async def reset_status():
 
 if __name__ == "__main__":
     import uvicorn
+    local_ip = _get_local_ip()
+    print(f"[SERVER] 🚀 Khởi động FastAPI tại http://{local_ip}:8000")
+    print(f"[SERVER] 📡 ESP32 sẽ tự tìm qua mDNS: falldect.local:8000")
     uvicorn.run(app, host="0.0.0.0", port=8000)

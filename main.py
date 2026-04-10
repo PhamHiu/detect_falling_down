@@ -16,7 +16,8 @@ from fall_logic import FallLogicManager
 #source = '../Data/test_video/test7.mp4'
 #source = '../Data/falldata/Home/Videos/video (2).avi'  # hard detect
 #source = '../Data/falldata/Home/Videos/video (1).avi'
-source = 0
+source = 2
+
 
 
 def kpt2bbox(kpt, ex=20):
@@ -60,8 +61,8 @@ if __name__ == '__main__':
     # Actions Estimate (ST-GCN — kept unchanged).
     action_model = TSSTG(device=device)
 
-    # Fall Logic Manager (unified states + 45s timer).
-    fall_manager = FallLogicManager(persistence_threshold=10) #/////////////////////////////////////////////////////////////////////////////////////////////
+    # Fall Logic Manager (unified states + 5s timer).
+    fall_manager = FallLogicManager(persistence_threshold=5) #/////////////////////////////////////////////////////////////////////////////////////////////
 
     cam_source = args.camera
     if type(cam_source) is str and os.path.isfile(cam_source):
